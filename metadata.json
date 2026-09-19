@@ -1,0 +1,10 @@
+{
+  "name": "Presensi & Penggajian GPS",
+  "description": "Aplikasi web presensi dan penggajian karyawan berbasis GPS dengan kalkulasi lembur kustom, estimasi gaji real-time, laporan pekerjaan supervisor/manager, integrasi spreadsheet, dan ekspor laporan PDF/Excel.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
