@@ -31,7 +31,9 @@ import {
   List,
   ChevronDown,
   KeyRound,
-  Lock
+  Lock,
+  Radio,
+  Compass
 } from 'lucide-react';
 import { 
   AttendanceRecord, 
@@ -48,6 +50,8 @@ import { exportPayrollReportPDF } from '../utils/exportPdf';
 import { exportPayrollAndAttendanceExcel } from '../utils/exportExcel';
 import { AdminWorkReportSection } from './AdminWorkReportSection';
 import { AttendanceCharts } from './AttendanceCharts';
+import { LiveEmployeeDashboard } from './LiveEmployeeDashboard';
+import { AttendanceMapsDashboard } from './AttendanceMapsDashboard';
 import { EmployeeModal } from './EmployeeModal';
 import { DeleteEmployeeModal } from './DeleteEmployeeModal';
 import { ShiftManagementModal } from './ShiftManagementModal';
@@ -86,7 +90,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onTriggerEmailAlert,
   onSendPushNotification,
 }) => {
-  const [activeTab, setActiveTab] = useState<'attendance' | 'attendance-charts' | 'payroll' | 'rules' | 'sheets' | 'reports' | 'employees' | 'work-reports'>('payroll');
+  const [activeTab, setActiveTab] = useState<'live-employees' | 'attendance-maps' | 'attendance' | 'attendance-charts' | 'payroll' | 'rules' | 'sheets' | 'reports' | 'employees' | 'work-reports'>('live-employees');
+  const [targetMapEmployeeId, setTargetMapEmployeeId] = useState<string | undefined>(undefined);
   
   // Department filter
   const [selectedDepartment, setSelectedDepartment] = useState<string>('Semua');
@@ -220,19 +225,58 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  // Handle Employee Add / Update
-  const handleSaveEmployee = (savedEmp: Employee) => {
-    const existingIndex = employees.findIndex((e) => e.id === savedEmp.id);
+  // Handle Employee Add / Update with ID correction support
+  const handleSaveEmployee = (savedEmp: Employee, originalId?: string) => {
+    const targetId = originalId || savedEmp.id;
+    const existingIndex = employees.findIndex((e) => e.id === targetId);
     let updatedList: Employee[];
     const shiftInfo = shifts.find((s) => s.id === savedEmp.currentShiftId)?.name || 'Shift Standar';
 
     if (existingIndex >= 0) {
-      updatedList = employees.map((e) => (e.id === savedEmp.id ? savedEmp : e));
+      updatedList = employees.map((e) => (e.id === targetId ? savedEmp : e));
+
+      // Cascade update to attendance records if ID or name changed
+      if (originalId && originalId !== savedEmp.id) {
+        const updatedAttendances = attendanceRecords.map((r) =>
+          r.employeeId === originalId
+            ? {
+                ...r,
+                employeeId: savedEmp.id,
+                employeeName: savedEmp.name,
+                department: savedEmp.department,
+              }
+            : r
+        );
+        onUpdateAttendanceRecords(updatedAttendances);
+
+        // Cascade update to work reports if present
+        if (onUpdateWorkReports && workReports) {
+          const updatedReports = workReports.map((w) =>
+            w.employeeId === originalId
+              ? {
+                  ...w,
+                  employeeId: savedEmp.id,
+                  employeeName: savedEmp.name,
+                  department: savedEmp.department,
+                  position: savedEmp.position,
+                }
+              : w
+          );
+          onUpdateWorkReports(updatedReports);
+        }
+
+        onSendPushNotification(
+          'ID Karyawan Diperbarui',
+          `ID Karyawan ${savedEmp.name} berhasil diperbarui dari ${originalId} menjadi ${savedEmp.id}. Riwayat presensi & laporan telah disinkronkan.`,
+          'info'
+        );
+      }
+
       onTriggerEmailAlert(
         savedEmp.email,
         `Pembaruan Data Karyawan & Shift: ${savedEmp.name}`,
         'EMPLOYEE_UPDATED',
-        `Data profil, gaji, dan pengaturan shift kerja Anda telah disesuaikan oleh Administrator (${shiftInfo}).`
+        `Data profil, ID Karyawan (${savedEmp.id}), gaji, dan pengaturan shift kerja Anda telah disesuaikan oleh Administrator (${shiftInfo}).`
       );
       onSendPushNotification(
         'Pembaruan Data Karyawan',
@@ -314,12 +358,40 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </p>
         </div>
 
-        {/* Quick Export Actions */}
+        {/* Quick Export Actions & Live Navigation */}
         <div className="flex items-center gap-2 flex-wrap">
           <button
             type="button"
+            onClick={() => setActiveTab('live-employees')}
+            className={`flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer shadow-sm ${
+              activeTab === 'live-employees'
+                ? 'bg-emerald-600 text-white shadow-emerald-900/30'
+                : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200'
+            }`}
+            title="Buka Dashboard Live Monitoring Karyawan"
+          >
+            <Radio className="w-3.5 h-3.5 text-emerald-500 animate-pulse" />
+            <span>Live Karyawan</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('attendance-maps')}
+            className={`flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer shadow-sm ${
+              activeTab === 'attendance-maps'
+                ? 'bg-indigo-600 text-white shadow-indigo-900/30'
+                : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200'
+            }`}
+            title="Buka Peta Presensi GPS Check-In & Check-Out"
+          >
+            <Compass className="w-3.5 h-3.5 text-indigo-500" />
+            <span>Peta Presensi GPS</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => exportPayrollReportPDF(filteredSummaries, config, selectedDepartment)}
-            className="flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-slate-900 text-white hover:bg-slate-800 shadow-sm transition cursor-pointer"
+            className="flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-slate-900 text-white hover:bg-slate-800 shadow-sm transition cursor-pointer"
           >
             <Download className="w-3.5 h-3.5 text-slate-300" />
             <span>Ekspor PDF</span>
@@ -328,19 +400,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <button
             type="button"
             onClick={() => exportPayrollAndAttendanceExcel(filteredSummaries, attendanceRecords, employees, config, selectedDepartment)}
-            className="flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-emerald-700 text-white hover:bg-emerald-800 shadow-sm transition cursor-pointer"
+            className="flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-emerald-700 text-white hover:bg-emerald-800 shadow-sm transition cursor-pointer"
           >
             <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-300" />
-            <span>Ekspor Excel (.xlsx)</span>
+            <span>Ekspor Excel</span>
           </button>
 
           <button
             type="button"
             onClick={() => setIsChangePasswordModalOpen(true)}
-            className="flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 shadow-xs transition cursor-pointer"
+            className="flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-200 shadow-2xs transition cursor-pointer"
             title="Ubah kata sandi akun Administrator"
           >
-            <KeyRound className="w-3.5 h-3.5 text-indigo-600" />
+            <KeyRound className="w-3.5 h-3.5 text-slate-600" />
             <span>Ganti Password Admin</span>
           </button>
         </div>
@@ -353,6 +425,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Menu Aktif</span>
             <span className="text-xs font-extrabold text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-lg border border-emerald-200">
+              {activeTab === 'live-employees' && 'Live Karyawan'}
+              {activeTab === 'attendance-maps' && 'Peta Presensi GPS'}
               {activeTab === 'payroll' && 'Gaji & Lembur'}
               {activeTab === 'attendance' && 'Log Presensi GPS'}
               {activeTab === 'attendance-charts' && 'Grafik Kehadiran'}
@@ -370,6 +444,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               onChange={(e) => setActiveTab(e.target.value as any)}
               className="w-full appearance-none bg-slate-50 border border-slate-300 font-bold text-slate-800 text-xs py-2.5 px-3.5 pr-9 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500"
             >
+              <option value="live-employees">🔴 Live Monitoring Karyawan (Real-Time)</option>
+              <option value="attendance-maps">🗺️ Peta Presensi GPS (Checkin & Checkout)</option>
               <option value="payroll">💰 Gaji & Lembur</option>
               <option value="attendance">📍 Log Presensi GPS</option>
               <option value="attendance-charts">📊 Grafik Kehadiran Pekerja</option>
@@ -384,6 +460,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           {/* Quick Horizontal Swipeable Pills */}
           <div className="flex items-center gap-1.5 overflow-x-auto whitespace-nowrap scrollbar-none pt-1">
+            <button
+              type="button"
+              onClick={() => setActiveTab('live-employees')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition shrink-0 flex items-center gap-1.5 ${
+                activeTab === 'live-employees' ? 'bg-emerald-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600'
+              }`}
+            >
+              <Radio className="w-3 h-3 text-emerald-300 animate-pulse" />
+              <span>Live Karyawan</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('attendance-maps')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition shrink-0 flex items-center gap-1.5 ${
+                activeTab === 'attendance-maps' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600'
+              }`}
+            >
+              <Compass className="w-3 h-3 text-indigo-300" />
+              <span>Peta GPS</span>
+            </button>
             <button
               type="button"
               onClick={() => setActiveTab('payroll')}
@@ -461,6 +557,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
         {/* Desktop Navigation Tabs */}
         <div className="hidden md:flex overflow-x-auto scrollbar-none border border-slate-200 bg-white rounded-2xl p-1.5 shadow-sm gap-1">
+          <button
+            type="button"
+            onClick={() => setActiveTab('live-employees')}
+            className={`py-2.5 px-3.5 text-xs font-bold whitespace-nowrap rounded-xl flex items-center gap-2 transition cursor-pointer ${
+              activeTab === 'live-employees'
+                ? 'bg-emerald-600 text-white shadow-sm shadow-emerald-900/20'
+                : 'text-slate-700 hover:bg-emerald-50 hover:text-emerald-800'
+            }`}
+          >
+            <Radio className={`w-4 h-4 ${activeTab === 'live-employees' ? 'text-white animate-pulse' : 'text-emerald-500'}`} />
+            <span>Live Karyawan</span>
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('attendance-maps')}
+            className={`py-2.5 px-3.5 text-xs font-bold whitespace-nowrap rounded-xl flex items-center gap-2 transition cursor-pointer ${
+              activeTab === 'attendance-maps'
+                ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-900/20'
+                : 'text-slate-700 hover:bg-indigo-50 hover:text-indigo-800'
+            }`}
+          >
+            <Compass className={`w-4 h-4 ${activeTab === 'attendance-maps' ? 'text-white' : 'text-indigo-500'}`} />
+            <span>Peta Presensi GPS</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setActiveTab('payroll')}
@@ -610,6 +733,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             />
           </div>
         </div>
+      )}
+
+      {/* TAB: DASHBOARD LIVE KARYAWAN (Bisa Diaktifkan dan Dinonaktifkan) */}
+      {activeTab === 'live-employees' && (
+        <LiveEmployeeDashboard
+          employees={employees}
+          attendanceRecords={attendanceRecords}
+          shifts={shifts}
+          config={config}
+          onUpdateEmployees={onUpdateEmployees}
+          onOpenMapsTab={(empId) => {
+            setTargetMapEmployeeId(empId);
+            setActiveTab('attendance-maps');
+          }}
+          onSendPushNotification={onSendPushNotification}
+        />
+      )}
+
+      {/* TAB: DASHBOARD KARYAWAN CHECKIN CHECKOUT MAPS */}
+      {activeTab === 'attendance-maps' && (
+        <AttendanceMapsDashboard
+          employees={employees}
+          attendanceRecords={attendanceRecords}
+          config={config}
+          shifts={shifts}
+          initialSelectedEmployeeId={targetMapEmployeeId}
+        />
       )}
 
       {/* TAB 1: REKAPITULASI PENGGAJIAN */}

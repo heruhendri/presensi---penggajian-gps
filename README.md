@@ -82,15 +82,32 @@ Seluruh elemen antarmuka, laporan PDF, dan workbook Excel dilengkapi watermark r
 - **Workbook Spreadsheet Excel (XLSX)**:
   - Multi-sheet: `Rekap Penggajian`, `Log Presensi GPS`, `Master Karyawan`, dan `Info Sistem`.
 
-### 7. 🔄 Integrasi Database Google Sheets
+### 7. 🔴 Dashboard Live Monitoring Karyawan (Dapat Diaktifkan & Dinonaktifkan)
+- **Saklar Monitoring Interaktif**: Administrator dapat menyalakan atau mematikan pemantauan live sesuai kebutuhan operasional (status saklar tersimpan rapi di *localStorage*).
+- **Status Kehadiran Real-Time**:
+  - 🟢 **Sedang Bekerja**: Karyawan yang telah check-in dan berada dalam batas geofence aman.
+  - 🔴 **Di Luar Radius**: Karyawan yang check-in di luar radius kantor resmi.
+  - 🔵 **Sudah Selesai**: Karyawan yang telah check-out hari ini.
+  - ⚪ **Belum Hadir**: Karyawan yang belum melakukan absensi.
+- **Kontrol Status Keaktifan (Active/Inactive Toggle)**: Kemudahan menonaktifkan atau mengaktifkan kembali akun/status karyawan kapan saja hanya dengan satu klik.
+- **Aksi Cepat & Kirim Peringatan**: Kirim pesan push langsung ke karyawan atau buka posisi GPS mereka di peta satelit.
+
+### 8. 🗺️ Dashboard Peta Presensi GPS (Check-in & Check-out Maps)
+- **Peta Interaktif Geofencing**: Memvisualisasikan pusat koordinat kantor beserta lingkaran batas radius kerja (*geofence zone*) secara visual.
+- **Pin Lokasi Check-In & Check-Out**: Setiap titik koordinat presensi dipetakan dengan akurat, membedakan lokasi saat mulai bekerja dan saat selesai shift.
+- **Detail Analitik Koordinat**: Informasi lengkap mengenai jarak meter ke kantor, akurasi GPS perangkat, waktu pencatatan, dan tombol langsung ke Google Maps koordinat eksternal.
+- **Kontrol Peta Lengkap**: Tombol perbesar (*zoom in*), perkecil (*zoom out*), atur ulang tampilan (*reset view*), dan pemilih fokus per karyawan.
+- **Tersedia untuk Admin & Karyawan**: Baik Administrator maupun Karyawan dapat mengakses visualisasi peta presensi ini di portal masing-masing.
+
+### 9. 🔄 Integrasi Database Google Sheets
 - **Sinkronisasi Dua Arah**: Sinkronkan log presensi, data lembur, dan rekapitulasi gaji langsung ke Google Sheets.
 - **Webhook & Spreadsheet URL**: Konfigurasi ID Spreadsheet dan URL Web App Google Apps Script langsung di dashboard.
 
-### 8. 🔔 Notifikasi Push & Log Email Peringatan
+### 10. 🔔 Notifikasi Push & Log Email Peringatan
 - **Pusat Pemberitahuan (Notification Center)**: Notifikasi perubahan jadwal shift, persetujuan lembur, dan status presensi.
 - **Log Notifikasi Email**: Riwayat pengiriman peringatan absensi dan slip gaji ke email karyawan dan admin.
 
-### 9. 🔐 Keamanan, Manajemen Sesi & Ganti Password Admin
+### 11. 🔐 Keamanan, Manajemen Sesi & Ganti Password Admin
 - **Kebijakan No Auto-Login**: Aplikasi memulai sesi dalam keadaan aman/terkunci saat dibuka atau di-refresh.
 - **Modal Ganti Password Administrator**: Admin dapat mengubah username dan password admin secara langsung dengan validasi password lama dan verifikasi konfirmasi.
 - **Pemisahan Peran (RBAC)**: Pemisahan hak akses yang tegas antara Administrator HRD dan Karyawan.
@@ -139,7 +156,23 @@ Seluruh elemen antarmuka, laporan PDF, dan workbook Excel dilengkapi watermark r
    - Masalah atau kendala yang dihadapi (opsional).
 4. Klik **"Kirim Laporan & Check-Out"**. Status kehadiran dan jam kerja Anda akan langsung diperbarui.
 
-### 4. Mengubah Password Admin (Administrator)
+### 4. Menggunakan Dashboard Live Karyawan (Admin)
+1. Masuk sebagai **Admin HRD** dan klik tab **"Live Karyawan"** (ikon radar merah/hijau).
+2. Gunakan saklar toggle **"Status Monitoring: AKTIF / NONAKTIF"** di pojok kanan atas untuk mengontrol pemantauan real-time sesuai jam operasional.
+3. Pantau status karyawan secara instan: *Sedang Bekerja*, *Di Luar Radius*, *Sudah Pulang*, dan *Belum Hadir*.
+4. Klik saklar **"Aktif / Nonaktif"** pada baris karyawan untuk mengaktifkan atau menonaktifkan status kepegawaian kapan pun diperlukan.
+5. Klik tombol **"Peta GPS"** pada karyawan untuk langsung membuka lokasi presensinya di peta visual.
+
+### 5. Menggunakan Dashboard Peta Presensi GPS (Check-In & Check-Out Maps)
+1. Buka tab **"Peta Presensi GPS"** (tersedia di Admin Dashboard maupun Portal Karyawan).
+2. Amati visualisasi kantor dan lingkaran batas radius (*geofence zone*) berwarna hijau.
+3. Periksa titik koordinat:
+   - **Pin Hijau**: Titik koordinat saat karyawan melakukan Check-In masuk.
+   - **Pin Biru / Oranye**: Titik koordinat saat karyawan melakukan Check-Out pulang.
+4. Klik pin atau pilih nama karyawan di panel daftar untuk membaca koordinat lintang/bujur, jarak aktual ke kantor, akurasi GPS, dan membuka tautan langsung ke Google Maps satelit.
+5. Gunakan kontrol zoom `+` / `-` serta tombol *Center Office* untuk navigasi visual yang nyaman.
+
+### 6. Mengubah Password Admin (Administrator)
 1. Masuk sebagai **Admin HRD**.
 2. Pada bilah navigasi atas (Navbar), klik tombol **"Ganti Password Admin"** (ikon kunci).
 3. Masukkan:

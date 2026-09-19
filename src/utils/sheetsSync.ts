@@ -71,67 +71,111 @@ export async function syncToSpreadsheetWebhook(
 export function getGoogleAppsScriptTemplate(): string {
   return `/**
  * GOOGLE APPS SCRIPT WEB APP UNTUK SISTEM PRESENSI & PENGGAJIAN
+ * Dilengkapi Sinkronisasi Absen Luar Pulau/Radius, Approval Admin, & Koordinat Google Maps
  * 
  * Langkah Pemasangan:
  * 1. Buka Google Sheets baru di https://sheets.new
  * 2. Klik menu 'Ekstensi' (Extensions) -> 'Apps Script'
- * 3. Hapus kode bawaan dan tempel (paste) kode di bawah ini
+ * 3. Hapus kode bawaan dan tempel (paste) seluruh kode di bawah ini
  * 4. Klik 'Terapkan' (Deploy) -> 'Penerapan Baru' (New Deployment)
  * 5. Pilih jenis: 'Aplikasi Web' (Web app)
- * 6. Jalankan sebagai: 'Saya' (Me)
- * 7. Siapa yang memiliki akses: 'Siapa saja' (Anyone)
- * 8. Salin URL Aplikasi Web yang dihasilkan dan tempelkan pada Pengaturan Spreadsheet di aplikasi ini!
+ * 6. Deskripsi: 'Integrasi Database Presensi HRD'
+ * 7. Jalankan sebagai: 'Saya' (Me)
+ * 8. Siapa yang memiliki akses: 'Siapa saja' (Anyone)
+ * 9. Klik 'Terapkan' lalu Berikan Izin Akses (Allow Permissions)
+ * 10. Salin URL Aplikasi Web yang dihasilkan dan tempelkan ke aplikasi HRD!
  */
+
+function doGet(e) {
+  return ContentService.createTextOutput(JSON.stringify({
+    status: "online",
+    message: "Google Apps Script Presensi & HRD Database Webhook Siap Menerima Data.",
+    timestamp: new Date().toISOString()
+  })).setMimeType(ContentService.MimeType.JSON);
+}
 
 function doPost(e) {
   try {
     var data = JSON.parse(e.postData.contents);
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     
-    // 1. Simpan Sheet Presensi
+    // 1. Simpan Sheet Presensi Lengkap (Dengan Absen Luar Pulau & Google Maps)
     if (data.attendances && data.attendances.length > 0) {
       var sheetAtt = ss.getSheetByName("Presensi");
       if (!sheetAtt) {
         sheetAtt = ss.insertSheet("Presensi");
-        sheetAtt.appendRow([
-          "ID Presensi", "ID Karyawan", "Nama", "Departemen", "Tanggal",
-          "Jam Masuk", "Jam Pulang", "Durasi (Jam)", "Lembur (Jam)", "Uang Lembur", "Status", "Jarak GPS"
-        ]);
-        sheetAtt.getRange(1, 1, 1, 12).setFontWeight("bold").setBackground("#e2e8f0");
       }
       
-      // Bersihkan dan perbarui data
+      // Bersihkan dan set Header Kolom
       sheetAtt.clearContents();
-      sheetAtt.appendRow([
-        "ID Presensi", "ID Karyawan", "Nama", "Departemen", "Tanggal",
-        "Jam Masuk", "Jam Pulang", "Durasi (Jam)", "Lembur (Jam)", "Uang Lembur", "Status", "Jarak GPS"
-      ]);
-      sheetAtt.getRange(1, 1, 1, 12).setFontWeight("bold").setBackground("#e2e8f0");
+      var attHeaders = [
+        "ID Presensi", "ID Karyawan", "Nama Karyawan", "Departemen", "Tanggal",
+        "Jam Masuk", "Jam Pulang", "Durasi (Jam)", "Lembur (Jam)", "Uang Lembur (Rp)",
+        "Status", "Jarak GPS", "Jenis Penugasan", "Status Persetujuan",
+        "Disetujui Oleh", "Keterangan / Alasan", "Link Google Maps"
+      ];
+      sheetAtt.appendRow(attHeaders);
+      sheetAtt.getRange(1, 1, 1, attHeaders.length).setFontWeight("bold").setBackground("#0f172a").setFontColor("#f8fafc");
       
       var rows = data.attendances.map(function(a) {
+        var mapsLink = "";
+        if (a.checkInLat && a.checkInLng) {
+          mapsLink = "https://www.google.com/maps?q=" + a.checkInLat + "," + a.checkInLng;
+        }
+        var dutyType = a.isRemoteOrOutIsland ? (a.remoteReasonType || "Dinas Luar") : "Reguler Kantor";
+        var approval = a.approvalStatus ? a.approvalStatus.toUpperCase() : (a.status === "menunggu_persetujuan" ? "PENDING" : "APPROVED");
+        
         return [
           a.id, a.employeeId, a.employeeName, a.department, a.date,
-          a.checkInTime || "", a.checkOutTime || "", a.workDurationHours || 0,
-          a.overtimeHours || 0, a.overtimePay || 0, a.status, (a.checkInDistanceMeters || 0) + "m"
+          a.checkInTime || "-", a.checkOutTime || "-", a.workDurationHours || 0,
+          a.overtimeHours || 0, a.overtimePay || 0, a.status, (a.checkInDistanceMeters || 0) + " meter",
+          dutyType, approval, a.approvedBy || "-", a.remoteReasonNotes || a.notes || "-", mapsLink
         ];
       });
       if (rows.length > 0) {
-        sheetAtt.getRange(2, 1, rows.length, 12).setValues(rows);
+        sheetAtt.getRange(2, 1, rows.length, attHeaders.length).setValues(rows);
+      }
+    }
+
+    // 2. Simpan Sheet Master Karyawan (Proteksi Data Terpelihara)
+    if (data.employees && data.employees.length > 0) {
+      var sheetEmp = ss.getSheetByName("Data_Karyawan");
+      if (!sheetEmp) {
+        sheetEmp = ss.insertSheet("Data_Karyawan");
+      }
+      sheetEmp.clearContents();
+      var empHeaders = [
+        "ID Karyawan", "Nama Lengkap", "Username", "No HP", "Departemen", 
+        "Jabatan", "Gaji Pokok (Rp)", "Tunjangan (Rp)", "Transport Harian (Rp)", "Status Keaktifan"
+      ];
+      sheetEmp.appendRow(empHeaders);
+      sheetEmp.getRange(1, 1, 1, empHeaders.length).setFontWeight("bold").setBackground("#0f172a").setFontColor("#f8fafc");
+
+      var empRows = data.employees.map(function(emp) {
+        return [
+          emp.id, emp.name, emp.username || "-", emp.phone || "-", emp.department,
+          emp.position, emp.baseSalary, emp.allowance, emp.dailyTransport || 0,
+          emp.isActive === false ? "Non-Aktif (Diarsipkan)" : "Aktif"
+        ];
+      });
+      if (empRows.length > 0) {
+        sheetEmp.getRange(2, 1, empRows.length, empHeaders.length).setValues(empRows);
       }
     }
     
-    // 2. Simpan Sheet Penggajian
+    // 3. Simpan Sheet Rekapitulasi Penggajian & Lembur
     if (data.summaries && data.summaries.length > 0) {
-      var sheetPay = ss.getSheetByName("Penggajian");
+      var sheetPay = ss.getSheetByName("Rekap_Penggajian");
       if (!sheetPay) {
-        sheetPay = ss.insertSheet("Penggajian");
+        sheetPay = ss.insertSheet("Rekap_Penggajian");
       }
       sheetPay.clearContents();
-      sheetPay.appendRow([
+      var payHeaders = [
         "ID Karyawan", "Nama", "Departemen", "Jabatan", "Hari Hadir",
-        "Gaji Pokok", "Tunjangan", "Transport", "Uang Lembur", "Potongan", "Gaji Bersih"
-      ]);
-      sheetPay.getRange(1, 1, 1, 11).setFontWeight("bold").setBackground("#e2e8f0");
+        "Gaji Pokok (Rp)", "Tunjangan (Rp)", "Transport (Rp)", "Uang Lembur (Rp)", "Potongan Terlambat (Rp)", "Gaji Bersih / Take Home Pay (Rp)"
+      ];
+      sheetPay.appendRow(payHeaders);
+      sheetPay.getRange(1, 1, 1, payHeaders.length).setFontWeight("bold").setBackground("#0f172a").setFontColor("#f8fafc");
       
       var payRows = data.summaries.map(function(s) {
         return [
@@ -140,15 +184,20 @@ function doPost(e) {
         ];
       });
       if (payRows.length > 0) {
-        sheetPay.getRange(2, 1, payRows.length, 11).setValues(payRows);
+        sheetPay.getRange(2, 1, payRows.length, payHeaders.length).setValues(payRows);
       }
     }
     
-    return ContentService.createTextOutput(JSON.stringify({ status: "success", received: true }))
-      .setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(JSON.stringify({ 
+      status: "success", 
+      message: "Data Presensi, Karyawan, dan Penggajian berhasil diperbarui di Google Spreadsheet",
+      updatedAt: new Date().toISOString()
+    })).setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({ status: "error", error: err.toString() }))
-      .setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(JSON.stringify({ 
+      status: "error", 
+      message: err.toString() 
+    })).setMimeType(ContentService.MimeType.JSON);
   }
 }
 `;

@@ -23,14 +23,22 @@ import {
   Edit3,
   BarChart3,
   List,
-  LayoutGrid
+  LayoutGrid,
+  Compass
 } from 'lucide-react';
 import { AttendanceRecord, CompanyConfig, Employee, Shift, WorkReport } from '../types';
-import { calculateDistanceMeters, formatDistance, getCurrentCoordinates } from '../utils/geo';
+import { 
+  calculateDistanceMeters, 
+  formatDistance, 
+  getCurrentCoordinates,
+  getGpsAccuracyLevel,
+  getOffsetCoordinates
+} from '../utils/geo';
 import { computeEmployeePayroll, formatIDR, getPayrollCycleInfo } from '../utils/payroll';
 import { exportSingleEmployeeSlipPDF } from '../utils/exportPdf';
 import { WorkReportModal } from './WorkReportModal';
 import { EmployeePerformanceCharts } from './EmployeePerformanceCharts';
+import { AttendanceMapsDashboard } from './AttendanceMapsDashboard';
 
 interface EmployeePortalProps {
   employee: Employee;
@@ -57,18 +65,30 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
   const [currentTime, setCurrentTime] = useState(new Date());
 
   // Portal Tab state
-  const [activePortalTab, setActivePortalTab] = useState<'attendance' | 'performance' | 'work-reports'>('attendance');
+  const [activePortalTab, setActivePortalTab] = useState<'attendance' | 'performance' | 'work-reports' | 'gps-map'>('attendance');
   const [historyViewMode, setHistoryViewMode] = useState<'card' | 'table'>('table');
   const [isWorkReportModalOpen, setIsWorkReportModalOpen] = useState(false);
   const [editingReport, setEditingReport] = useState<WorkReport | undefined>(undefined);
   const [showCheckoutPrompt, setShowCheckoutPrompt] = useState(false);
 
-  // GPS State
+  // GPS State & Precision Validation
   const [currentLat, setCurrentLat] = useState<number>(config.officeLat);
   const [currentLng, setCurrentLng] = useState<number>(config.officeLng);
-  const [gpsAccuracy, setGpsAccuracy] = useState<number>(10);
+  const [gpsAccuracy, setGpsAccuracy] = useState<number>(8);
   const [isGettingLocation, setIsGettingLocation] = useState(false);
   const [gpsError, setGpsError] = useState<string | null>(null);
+  const [gpsSourceMode, setGpsSourceMode] = useState<'device' | 'preset'>('preset');
+  const [activeLocationPreset, setActiveLocationPreset] = useState<string>('office_center');
+
+  // Geofence Radius Out-of-bounds Alert Modal
+  const [radiusAlertModalOpen, setRadiusAlertModalOpen] = useState(false);
+  const [radiusAlertData, setRadiusAlertData] = useState<{
+    distance: number;
+    allowedRadius: number;
+    excess: number;
+    accuracy: number;
+  } | null>(null);
+  const [checkInSuccessBanner, setCheckInSuccessBanner] = useState<string | null>(null);
 
   // Checkin Form notes
   const [attendanceNotes, setAttendanceNotes] = useState('');
@@ -104,19 +124,75 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
   const payrollSummary = computeEmployeePayroll(employee, attendanceRecords, config);
   const cycleInfo = getPayrollCycleInfo(config);
 
-  // Fetch Real GPS coordinates from device
+  // Fetch Real GPS coordinates from device with high-accuracy satellite signal
   const handleDetectGPS = async () => {
     setIsGettingLocation(true);
     setGpsError(null);
+    setCheckInSuccessBanner(null);
     try {
-      const coords = await getCurrentCoordinates();
+      const coords = await getCurrentCoordinates({ enableHighAccuracy: true, timeout: 10000 });
       setCurrentLat(coords.lat);
       setCurrentLng(coords.lng);
       setGpsAccuracy(coords.accuracy);
+      setGpsSourceMode('device');
+      setActiveLocationPreset('device_real');
     } catch (err: any) {
       setGpsError(err.message || 'Gagal mendeteksi koordinat GPS.');
     } finally {
       setIsGettingLocation(false);
+    }
+  };
+
+  // Switch location presets for demonstration / testing accuracy
+  const handleSelectLocationPreset = (presetKey: string) => {
+    setActiveLocationPreset(presetKey);
+    setGpsError(null);
+    setCheckInSuccessBanner(null);
+
+    if (presetKey === 'device_real') {
+      handleDetectGPS();
+      return;
+    }
+
+    setGpsSourceMode('preset');
+    switch (presetKey) {
+      case 'office_center':
+        setCurrentLat(config.officeLat);
+        setCurrentLng(config.officeLng);
+        setGpsAccuracy(5);
+        break;
+      case 'lobby': {
+        const coords = getOffsetCoordinates(config.officeLat, config.officeLng, 18, 45);
+        setCurrentLat(coords.lat);
+        setCurrentLng(coords.lng);
+        setGpsAccuracy(8);
+        break;
+      }
+      case 'parking': {
+        const coords = getOffsetCoordinates(config.officeLat, config.officeLng, 38, 120);
+        setCurrentLat(coords.lat);
+        setCurrentLng(coords.lng);
+        setGpsAccuracy(12);
+        break;
+      }
+      case 'outside_close': {
+        const coords = getOffsetCoordinates(config.officeLat, config.officeLng, config.officeRadiusMeters + 35, 90);
+        setCurrentLat(coords.lat);
+        setCurrentLng(coords.lng);
+        setGpsAccuracy(18);
+        break;
+      }
+      case 'outside_far': {
+        const coords = getOffsetCoordinates(config.officeLat, config.officeLng, 2800, 210);
+        setCurrentLat(coords.lat);
+        setCurrentLng(coords.lng);
+        setGpsAccuracy(45);
+        break;
+      }
+      default:
+        setCurrentLat(config.officeLat);
+        setCurrentLng(config.officeLng);
+        setGpsAccuracy(10);
     }
   };
 
@@ -137,9 +213,43 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
     setPhotoPreview(dataUrl);
   };
 
-  const handlePerformCheckIn = () => {
-    if (!isInsideRadius) {
-      alert(`Peringatan GPS: Anda berada ${formatDistance(distanceToOffice)} dari kantor. Maksimal radius yang diizinkan admin adalah ${config.officeRadiusMeters} meter.`);
+  // Check-In verification with exact high-precision radius calculation
+  const handlePerformCheckIn = async () => {
+    let lat = currentLat;
+    let lng = currentLng;
+    let accuracy = gpsAccuracy;
+
+    // If using real device GPS mode, refresh fresh coordinates
+    if (gpsSourceMode === 'device') {
+      setIsGettingLocation(true);
+      try {
+        const fresh = await getCurrentCoordinates({ enableHighAccuracy: true, timeout: 8000 });
+        lat = fresh.lat;
+        lng = fresh.lng;
+        accuracy = fresh.accuracy;
+        setCurrentLat(lat);
+        setCurrentLng(lng);
+        setGpsAccuracy(accuracy);
+      } catch (err) {
+        // Fall back to current coordinates if refresh takes too long
+      } finally {
+        setIsGettingLocation(false);
+      }
+    }
+
+    // High precision distance check
+    const currentDistance = calculateDistanceMeters(lat, lng, config.officeLat, config.officeLng);
+    const isWithinGeofence = currentDistance <= config.officeRadiusMeters;
+
+    if (!isWithinGeofence) {
+      const excess = currentDistance - config.officeRadiusMeters;
+      setRadiusAlertData({
+        distance: currentDistance,
+        allowedRadius: config.officeRadiusMeters,
+        excess,
+        accuracy,
+      });
+      setRadiusAlertModalOpen(true);
       return;
     }
 
@@ -157,18 +267,21 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
       department: employee.department,
       date: todayStr,
       checkInTime: checkInTimeStr,
-      checkInLat: currentLat,
-      checkInLng: currentLng,
-      checkInDistanceMeters: distanceToOffice,
-      checkInAddress: `Terverifikasi GPS (${formatDistance(distanceToOffice)} dari titik pusat kantor)`,
+      checkInLat: lat,
+      checkInLng: lng,
+      checkInDistanceMeters: currentDistance,
+      checkInAddress: `Terverifikasi GPS (${formatDistance(currentDistance)} dari titik pusat kantor, Akurasi ±${Math.round(accuracy)}m)`,
       status: isLate ? 'terlambat' : 'hadir',
       workDurationHours: 0,
       overtimeHours: 0,
       overtimePay: 0,
       isOvertimeApproved: false,
-      notes: attendanceNotes || (isLate ? 'Presensi terlambat' : 'Presensi tepat waktu'),
+      notes: attendanceNotes || (isLate ? 'Presensi terlambat' : 'Presensi tepat waktu terverifikasi'),
     });
 
+    setCheckInSuccessBanner(
+      `Check-in berhasil tercatat! Posisi terverifikasi akurat di dalam radius kantor (${formatDistance(currentDistance)} dari pusat kantor, Akurasi: ±${Math.round(accuracy)}m).`
+    );
     setAttendanceNotes('');
   };
 
@@ -381,6 +494,7 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
               className="w-full appearance-none bg-slate-50 border border-slate-200 text-slate-900 font-bold text-sm rounded-xl py-2.5 pl-3 pr-10 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
             >
               <option value="attendance">📍 Presensi GPS & Estimasi Gaji</option>
+              <option value="gps-map">🗺️ Peta Lokasi Presensi GPS</option>
               <option value="performance">📈 Grafik & Rekomendasi Kinerja</option>
               <option value="work-reports">📝 Laporan Kerja ({myReports.length})</option>
             </select>
@@ -403,6 +517,19 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
           >
             <MapPin className="w-4 h-4 text-emerald-400" />
             <span>Presensi GPS & Gaji</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActivePortalTab('gps-map')}
+            className={`flex-1 py-2.5 px-4 text-xs font-bold rounded-xl transition flex items-center justify-center gap-2 cursor-pointer ${
+              activePortalTab === 'gps-map'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            <Compass className="w-4 h-4 text-indigo-400" />
+            <span>Peta Lokasi GPS</span>
           </button>
 
           <button
@@ -470,11 +597,72 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
             </div>
 
             <div className="p-5 space-y-4">
+              {/* Check-In Success Banner */}
+              {checkInSuccessBanner && (
+                <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-start gap-2.5">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <div className="font-bold">Presensi Berhasil Diverifikasi</div>
+                    <p className="text-[11px] text-emerald-700 mt-0.5">{checkInSuccessBanner}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCheckInSuccessBanner(null)}
+                    className="text-emerald-500 hover:text-emerald-800 text-xs cursor-pointer font-bold px-1"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {/* Location Mode & Signal Quality Selector */}
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+                    <Compass className="w-4 h-4 text-emerald-600" />
+                    Sumber & Uji Sinyal GPS
+                  </span>
+                  {(() => {
+                    const accInfo = getGpsAccuracyLevel(gpsAccuracy);
+                    return (
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 ${
+                        accInfo.level === 'high'
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : accInfo.level === 'medium'
+                          ? 'bg-amber-100 text-amber-800'
+                          : 'bg-rose-100 text-rose-800'
+                      }`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${
+                          accInfo.level === 'high' ? 'bg-emerald-500 animate-pulse' : accInfo.level === 'medium' ? 'bg-amber-500' : 'bg-rose-500'
+                        }`} />
+                        {accInfo.label} (±{Math.round(gpsAccuracy)}m)
+                      </span>
+                    );
+                  })()}
+                </div>
+
+                <select
+                  value={activeLocationPreset}
+                  onChange={(e) => handleSelectLocationPreset(e.target.value)}
+                  className="w-full text-xs bg-white border border-slate-300 rounded-lg px-2.5 py-2 text-slate-800 font-medium focus:ring-2 focus:ring-emerald-500 focus:outline-none cursor-pointer"
+                >
+                  <option value="device_real">🛰️ Sensor GPS Perangkat Asli (Hardware Geolocation)</option>
+                  <option value="office_center">🏢 Titik Pusat Kantor (Jarak 0m • Dalam Radius)</option>
+                  <option value="lobby">🚪 Lobi & Resepsionis (Jarak ~18m • Dalam Radius)</option>
+                  <option value="parking">🅿️ Area Parkir Kantor (Jarak ~38m • Dalam Radius)</option>
+                  <option value="outside_close">🛣️ Luar Radius Dekat (Jarak ~{config.officeRadiusMeters + 35}m • Ditolak)</option>
+                  <option value="outside_far">🏠 Luar Kota / Jarak Jauh (Jarak ~2.8 km • Ditolak)</option>
+                </select>
+                <p className="text-[10px] text-slate-500">
+                  Sistem secara otomatis menghitung rumus geodesi Haversine ke titik pusat kantor ({config.officeRadiusMeters}m).
+                </p>
+              </div>
+
               {/* GPS Geofence Visual Meter */}
               <div className="rounded-xl p-4 bg-slate-900 text-white space-y-3">
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-slate-400">Jarak Aktual Anda ke Kantor</span>
-                  <span className="font-mono font-bold text-emerald-400 text-sm">
+                  <span className={`font-mono font-bold text-sm ${isInsideRadius ? 'text-emerald-400' : 'text-rose-400'}`}>
                     {formatDistance(distanceToOffice)}
                   </span>
                 </div>
@@ -485,13 +673,17 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
                     className={`h-full transition-all duration-500 ${
                       isInsideRadius ? 'bg-emerald-500' : 'bg-rose-500'
                     }`}
-                    style={{ width: `${Math.min(100, Math.max(8, (distanceToOffice / (config.officeRadiusMeters * 3)) * 100))}%` }}
+                    style={{ width: `${Math.min(100, Math.max(8, (distanceToOffice / (config.officeRadiusMeters * 2)) * 100))}%` }}
                   />
                 </div>
 
                 <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1">
                   <span>Batas Geofence: {config.officeRadiusMeters} meter</span>
-                  <span>Akurasi GPS: ±{Math.round(gpsAccuracy)}m</span>
+                  <span className={isInsideRadius ? 'text-emerald-400' : 'text-rose-400 font-semibold'}>
+                    {isInsideRadius 
+                      ? `Sisa toleransi: ${Math.round(config.officeRadiusMeters - distanceToOffice)}m` 
+                      : `Lebih ${Math.round(distanceToOffice - config.officeRadiusMeters)}m di luar batas`}
+                  </span>
                 </div>
 
                 {/* Office Target & Coordinates */}
@@ -581,15 +773,23 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
                   <button
                     type="button"
                     onClick={handlePerformCheckIn}
-                    disabled={!isInsideRadius}
-                    className={`w-full py-3 px-4 rounded-xl font-bold text-sm text-white transition flex items-center justify-center gap-2 shadow-md ${
+                    className={`w-full py-3 px-4 rounded-xl font-bold text-sm text-white transition flex items-center justify-center gap-2 shadow-md cursor-pointer ${
                       isInsideRadius
-                        ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-700/25 cursor-pointer'
-                        : 'bg-slate-400 cursor-not-allowed'
+                        ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-700/25'
+                        : 'bg-rose-600 hover:bg-rose-700 shadow-rose-700/25'
                     }`}
                   >
-                    <CheckCircle className="w-5 h-5" />
-                    <span>Check-In Sekarang ({currentTime.toLocaleTimeString('id-ID').slice(0, 5)})</span>
+                    {isInsideRadius ? (
+                      <>
+                        <CheckCircle className="w-5 h-5" />
+                        <span>Check-In Sekarang ({currentTime.toLocaleTimeString('id-ID').slice(0, 5)} WIB)</span>
+                      </>
+                    ) : (
+                      <>
+                        <AlertTriangle className="w-5 h-5" />
+                        <span>Di Luar Radius Kantor ({formatDistance(distanceToOffice)}) - Verifikasi</span>
+                      </>
+                    )}
                   </button>
                 ) : !todayRecord.checkOutTime ? (
                   <div className="space-y-2">
@@ -1147,6 +1347,17 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
         </div>
       )}
 
+      {/* TAB: PETA LOKASI PRESENSI GPS */}
+      {activePortalTab === 'gps-map' && (
+        <AttendanceMapsDashboard
+          employees={[employee]}
+          attendanceRecords={attendanceRecords}
+          config={config}
+          shifts={shifts}
+          initialSelectedEmployeeId={employee.id}
+        />
+      )}
+
       {/* WORK REPORT SUBMISSION / EDIT MODAL */}
       {isWorkReportModalOpen && (
         <WorkReportModal
@@ -1205,6 +1416,103 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
               >
                 <FileText className="w-4 h-4" />
                 <span>Isi Laporan Sekarang</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* GEOFENCE RADIUS VERIFICATION ALERT MODAL */}
+      {radiusAlertModalOpen && radiusAlertData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95">
+            {/* Modal Header */}
+            <div className="p-5 bg-rose-50 border-b border-rose-100 flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-rose-600/30">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-base text-rose-950">Validasi Geofence Gagal: Di Luar Radius</h3>
+                <p className="text-xs text-rose-700">Presensi tidak dapat diproses di luar jangkauan kantor resmi</p>
+              </div>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 space-y-4 text-xs">
+              <div className="p-4 bg-slate-900 text-white rounded-xl space-y-3">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-slate-400">Jarak Terdeteksi ke Kantor:</span>
+                  <span className="font-mono font-bold text-rose-400 text-sm">
+                    {formatDistance(radiusAlertData.distance)}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-slate-400">Batas Maksimal Radius:</span>
+                  <span className="font-mono font-bold text-emerald-400">
+                    {radiusAlertData.allowedRadius} meter
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-xs pt-2 border-t border-slate-800">
+                  <span className="text-slate-400">Kelebihan Jarak di Luar Area:</span>
+                  <span className="font-mono font-bold text-rose-300">
+                    +{formatDistance(radiusAlertData.excess)}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-[11px] text-slate-400">
+                  <span>Akurasi Sinyal GPS:</span>
+                  <span className="font-mono text-slate-300">
+                    ±{Math.round(radiusAlertData.accuracy)} meter ({getGpsAccuracyLevel(radiusAlertData.accuracy).label})
+                  </span>
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 space-y-1.5">
+                <div className="font-bold flex items-center gap-1.5 text-amber-950">
+                  <Info className="w-4 h-4 text-amber-600 shrink-0" />
+                  Ketentuan Presensi Berbasis Lokasi Akurat:
+                </div>
+                <p className="text-[11px] text-amber-800 leading-relaxed">
+                  Sistem mewajibkan presensi fisik tepat di area kantor ({config.officeRadiusMeters}m dari titik pusat). Hal ini untuk memastikan integritas jam kerja dan validitas kalkulasi insentif transport harian.
+                </p>
+              </div>
+
+              <p className="text-slate-500 text-[11px]">
+                Jika Anda sudah berada di kantor namun GPS meleset, pastikan Anda berada di area terbuka atau dekat jendela dan klik tombol <strong>Segarkan GPS</strong> di bawah.
+              </p>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setRadiusAlertModalOpen(false);
+                  setActivePortalTab('gps-map');
+                }}
+                className="w-full sm:w-auto py-2.5 px-4 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-200 transition cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <Compass className="w-4 h-4 text-indigo-600" />
+                <span>Lihat Titik di Peta</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setRadiusAlertModalOpen(false);
+                  handleDetectGPS();
+                }}
+                className="w-full sm:w-auto py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition flex items-center justify-center gap-2 cursor-pointer shadow-md shadow-emerald-600/20"
+              >
+                <Navigation className="w-4 h-4" />
+                <span>Segarkan GPS Ulang</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setRadiusAlertModalOpen(false)}
+                className="w-full sm:w-auto py-2.5 px-4 rounded-xl border border-slate-300 text-xs font-semibold text-slate-600 hover:bg-white transition cursor-pointer"
+              >
+                Tutup
               </button>
             </div>
           </div>

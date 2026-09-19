@@ -5,7 +5,7 @@ import { Employee, Shift } from '../types';
 interface EmployeeModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (employee: Employee) => void;
+  onSave: (employee: Employee, originalId?: string) => void;
   employeeToEdit?: Employee | null;
   existingEmployees: Employee[];
   shifts: Shift[];
@@ -30,8 +30,6 @@ export const EmployeeModal: React.FC<EmployeeModalProps> = ({
   existingEmployees,
   shifts,
 }) => {
-  if (!isOpen) return null;
-
   const isEditMode = Boolean(employeeToEdit);
 
   // Generate next ID if new
@@ -46,32 +44,84 @@ export const EmployeeModal: React.FC<EmployeeModalProps> = ({
     return `EMP${String(max + 1).padStart(3, '0')}`;
   };
 
-  const [id, setId] = useState(employeeToEdit?.id || defaultNextId());
-  const [name, setName] = useState(employeeToEdit?.name || '');
-  const [username, setUsername] = useState(employeeToEdit?.username || '');
-  const [phone, setPhone] = useState(employeeToEdit?.phone || '');
-  const [password, setPassword] = useState(employeeToEdit?.password || 'karyawan123');
-  const [email, setEmail] = useState(employeeToEdit?.email || '');
-  const [department, setDepartment] = useState(employeeToEdit?.department || DEPARTMENTS[0]);
+  const [id, setId] = useState('');
+  const [name, setName] = useState('');
+  const [username, setUsername] = useState('');
+  const [phone, setPhone] = useState('');
+  const [password, setPassword] = useState('karyawan123');
+  const [email, setEmail] = useState('');
+  const [department, setDepartment] = useState(DEPARTMENTS[0]);
   const [customDepartment, setCustomDepartment] = useState('');
-  const [position, setPosition] = useState(employeeToEdit?.position || '');
-  const [currentShiftId, setCurrentShiftId] = useState(employeeToEdit?.currentShiftId || (shifts[0]?.id || 'shift-1'));
-  const [baseSalary, setBaseSalary] = useState<number>(employeeToEdit?.baseSalary ?? 5500000);
-  const [allowance, setAllowance] = useState<number>(employeeToEdit?.allowance ?? 750000);
-  const [dailyTransport, setDailyTransport] = useState<number>(employeeToEdit?.dailyTransport ?? 35000);
-  const [bankName, setBankName] = useState(employeeToEdit?.bankName || 'BCA');
-  const [bankAccount, setBankAccount] = useState(employeeToEdit?.bankAccount || '');
-  const [requiresWorkReport, setRequiresWorkReport] = useState<boolean>(employeeToEdit?.requiresWorkReport ?? false);
+  const [position, setPosition] = useState('');
+  const [currentShiftId, setCurrentShiftId] = useState(shifts[0]?.id || 'shift-1');
+  const [baseSalary, setBaseSalary] = useState<number>(5500000);
+  const [allowance, setAllowance] = useState<number>(750000);
+  const [dailyTransport, setDailyTransport] = useState<number>(35000);
+  const [bankName, setBankName] = useState('BCA');
+  const [bankAccount, setBankAccount] = useState('');
+  const [requiresWorkReport, setRequiresWorkReport] = useState<boolean>(false);
   const [reportRequirementReason, setReportRequirementReason] = useState(
-    employeeToEdit?.reportRequirementReason || 'Tanggung Jawab Supervisi / Output Shift'
+    'Tanggung Jawab Supervisi / Output Shift'
   );
 
   // Custom working hours toggle
-  const [useCustomHours, setUseCustomHours] = useState<boolean>(Boolean(employeeToEdit?.customHours));
-  const [customStartTime, setCustomStartTime] = useState(employeeToEdit?.customHours?.startTime || '08:00');
-  const [customEndTime, setCustomEndTime] = useState(employeeToEdit?.customHours?.endTime || '17:00');
+  const [useCustomHours, setUseCustomHours] = useState<boolean>(false);
+  const [customStartTime, setCustomStartTime] = useState('08:00');
+  const [customEndTime, setCustomEndTime] = useState('17:00');
 
   const [errorMsg, setErrorMsg] = useState('');
+
+  // Synchronize state whenever modal opens or employeeToEdit changes
+  useEffect(() => {
+    if (isOpen) {
+      if (employeeToEdit) {
+        setId(employeeToEdit.id);
+        setName(employeeToEdit.name);
+        setUsername(employeeToEdit.username);
+        setPhone(employeeToEdit.phone);
+        setPassword(employeeToEdit.password);
+        setEmail(employeeToEdit.email);
+        setDepartment(employeeToEdit.department);
+        setCustomDepartment('');
+        setPosition(employeeToEdit.position);
+        setCurrentShiftId(employeeToEdit.currentShiftId || shifts[0]?.id || 'shift-1');
+        setBaseSalary(employeeToEdit.baseSalary ?? 5500000);
+        setAllowance(employeeToEdit.allowance ?? 750000);
+        setDailyTransport(employeeToEdit.dailyTransport ?? 35000);
+        setBankName(employeeToEdit.bankName || 'BCA');
+        setBankAccount(employeeToEdit.bankAccount || '');
+        setRequiresWorkReport(Boolean(employeeToEdit.requiresWorkReport));
+        setReportRequirementReason(
+          employeeToEdit.reportRequirementReason || 'Tanggung Jawab Supervisi / Output Shift'
+        );
+        setUseCustomHours(Boolean(employeeToEdit.customHours));
+        setCustomStartTime(employeeToEdit.customHours?.startTime || '08:00');
+        setCustomEndTime(employeeToEdit.customHours?.endTime || '17:00');
+      } else {
+        setId(defaultNextId());
+        setName('');
+        setUsername('');
+        setPhone('');
+        setPassword('karyawan123');
+        setEmail('');
+        setDepartment(DEPARTMENTS[0]);
+        setCustomDepartment('');
+        setPosition('');
+        setCurrentShiftId(shifts[0]?.id || 'shift-1');
+        setBaseSalary(5500000);
+        setAllowance(750000);
+        setDailyTransport(35000);
+        setBankName('BCA');
+        setBankAccount('');
+        setRequiresWorkReport(false);
+        setReportRequirementReason('Tanggung Jawab Supervisi / Output Shift');
+        setUseCustomHours(false);
+        setCustomStartTime('08:00');
+        setCustomEndTime('17:00');
+      }
+      setErrorMsg('');
+    }
+  }, [isOpen, employeeToEdit]);
 
   // Auto-detect work report requirement recommendation on position change
   useEffect(() => {
@@ -84,9 +134,17 @@ export const EmployeeModal: React.FC<EmployeeModalProps> = ({
     }
   }, [position, isEditMode]);
 
+  if (!isOpen) return null;
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
+
+    const formattedId = id.trim().toUpperCase();
+    if (!formattedId) {
+      setErrorMsg('ID Karyawan wajib diisi (contoh: EMP001)');
+      return;
+    }
 
     if (!name.trim()) {
       setErrorMsg('Nama lengkap karyawan wajib diisi');
@@ -105,16 +163,19 @@ export const EmployeeModal: React.FC<EmployeeModalProps> = ({
       return;
     }
 
-    // Check ID conflict if adding new
-    if (!isEditMode && existingEmployees.some((e) => e.id.toLowerCase() === id.trim().toLowerCase())) {
-      setErrorMsg(`ID Karyawan ${id} sudah terdaftar. Gunakan ID lain.`);
+    // Check ID conflict with other employees
+    const isIdInUseByOther = existingEmployees.some(
+      (emp) => emp.id.toUpperCase() === formattedId && emp.id.toUpperCase() !== employeeToEdit?.id.toUpperCase()
+    );
+    if (isIdInUseByOther) {
+      setErrorMsg(`ID Karyawan "${formattedId}" sudah terdaftar pada karyawan lain. Gunakan ID yang unik.`);
       return;
     }
 
     const finalDepartment = department === 'OTHER' ? customDepartment || 'Umum' : department;
 
     const newEmployee: Employee = {
-      id: id.trim().toUpperCase(),
+      id: formattedId,
       name: name.trim(),
       username: username.trim().toLowerCase(),
       phone: phone.trim(),
@@ -133,7 +194,7 @@ export const EmployeeModal: React.FC<EmployeeModalProps> = ({
       customHours: useCustomHours ? { startTime: customStartTime, endTime: customEndTime } : undefined,
     };
 
-    onSave(newEmployee);
+    onSave(newEmployee, employeeToEdit?.id);
     onClose();
   };
 
@@ -179,16 +240,35 @@ export const EmployeeModal: React.FC<EmployeeModalProps> = ({
             </h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">ID Karyawan</label>
-                <input
-                  type="text"
-                  required
-                  value={id}
-                  disabled={isEditMode}
-                  onChange={(e) => setId(e.target.value)}
-                  placeholder="EMP001"
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-slate-900 bg-slate-50 disabled:opacity-70"
-                />
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block font-semibold text-slate-700">
+                    ID Karyawan {isEditMode && <span className="text-[10px] text-indigo-600 font-normal ml-1">(Dapat diedit / dikoreksi)</span>}
+                  </label>
+                  {!isEditMode && (
+                    <button
+                      type="button"
+                      onClick={() => setId(defaultNextId())}
+                      className="text-[10px] text-emerald-600 hover:text-emerald-700 font-medium cursor-pointer"
+                    >
+                      Auto Generate ID
+                    </button>
+                  )}
+                </div>
+                <div className="relative">
+                  <input
+                    type="text"
+                    required
+                    value={id}
+                    onChange={(e) => setId(e.target.value.toUpperCase().replace(/\s+/g, ''))}
+                    placeholder="EMP001"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-slate-900 bg-white focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                  />
+                </div>
+                <p className="text-[10px] text-slate-400 mt-1">
+                  {isEditMode
+                    ? 'Koreksi ID jika terdapat kesalahan penulisan. Seluruh riwayat presensi & laporan akan disesuaikan otomatis.'
+                    : 'Format standar berurutan: EMP001, EMP002, dst.'}
+                </p>
               </div>
 
               <div>

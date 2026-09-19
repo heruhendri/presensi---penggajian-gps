@@ -18,6 +18,7 @@ export interface Employee {
   bankName?: string;
   requiresWorkReport?: boolean; // Wajib mengirimkan laporan pekerjaan harian (contoh: Supervisor, Manager)
   reportRequirementReason?: string; // Alasan kewajiban lapor (e.g., 'Jabatan Manajerial/Supervisi')
+  isActive?: boolean; // Status aktif karyawan (bisa diaktifkan dan dinonaktifkan)
   customHours?: {
     startTime: string;
     endTime: string;
@@ -50,12 +51,21 @@ export interface AttendanceRecord {
   checkOutLng?: number;
   checkOutDistanceMeters?: number;
   checkOutAddress?: string;
-  status: 'hadir' | 'terlambat' | 'izin' | 'alpha' | 'lembur';
+  status: 'hadir' | 'terlambat' | 'izin' | 'alpha' | 'lembur' | 'menunggu_persetujuan' | 'ditolak';
   workDurationHours: number;
   overtimeHours: number;
   overtimePay: number;
   isOvertimeApproved: boolean;
   notes?: string;
+  // Out-of-radius / Out-of-island / Remote attendance attributes
+  isRemoteOrOutIsland?: boolean;
+  remoteReasonType?: 'dinas_luar_kota' | 'luar_pulau' | 'kunjungan_klien' | 'wfh_remote' | 'proyek_lapangan' | 'lainnya';
+  remoteReasonNotes?: string;
+  remoteAttachmentPhoto?: string;
+  approvalStatus?: 'pending' | 'approved' | 'rejected';
+  approvedBy?: string;
+  approvedAt?: string;
+  rejectionReason?: string;
 }
 
 export interface OvertimeMultiplierRule {
@@ -67,6 +77,14 @@ export interface OvertimeMultiplierRule {
 export interface CompanyConfig {
   companyName: string;
   companyAddress: string;
+  companyLogo?: string;
+  companyPhone?: string;
+  companyEmail?: string;
+  companyWebsite?: string;
+  companyDirector?: string;
+  companyTaxNumber?: string;
+  allowRemoteOutIslandAttendance?: boolean;
+  
   // GPS Geofence Coordinate
   officeLat: number;
   officeLng: number;
