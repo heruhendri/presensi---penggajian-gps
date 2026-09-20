@@ -8,8 +8,10 @@ export interface Employee {
   name: string;
   department: string;      // Operasional, IT, HR, Finance, Marketing
   position: string;
-  baseSalary: number;      // Gaji Pokok per bulan (IDR)
-  allowance: number;       // Tunjangan tetap bulanan
+  salaryType?: 'monthly' | 'daily'; // 'monthly' (Bulanan Tetap) atau 'daily' (Upah Harian). Default: 'monthly'
+  baseSalary: number;      // Gaji Pokok per bulan ATAU Upah pokok harian jika salaryType === 'daily' (IDR)
+  dailyRate?: number;      // Nilai eksplisit upah per hari jika salaryType === 'daily'
+  allowance: number;       // Tunjangan tetap bulanan / operasional
   dailyTransport: number;  // Uang makan / transport per hari hadir
   currentShiftId: string;
   email: string;
@@ -74,15 +76,35 @@ export interface OvertimeMultiplierRule {
   description: string;
 }
 
+export interface HolidayOrSpecialDay {
+  id: string;
+  date: string; // YYYY-MM-DD
+  name: string; // e.g. "Tahun Baru Masehi", "Cuti Bersama", "HUT Perusahaan"
+  type: 'national_holiday' | 'sunday' | 'custom' | 'cuti_bersama' | 'special_day';
+  description?: string;
+  customMultiplier?: number; // Optional custom multiplier override for this specific day (e.g. 2.5x or 3.0x)
+}
+
 export interface CompanyConfig {
+  // Application Identity & Branding
+  appName?: string;
+  appTagline?: string;
+  appVersion?: string;
+
+  // Company Profile Details
   companyName: string;
   companyAddress: string;
+  companyCity?: string;
+  companyPostalCode?: string;
+  companyIndustry?: string;
   companyLogo?: string;
   companyPhone?: string;
   companyEmail?: string;
   companyWebsite?: string;
   companyDirector?: string;
+  companyDirectorTitle?: string;
   companyTaxNumber?: string;
+  companyStampUrl?: string;
   allowRemoteOutIslandAttendance?: boolean;
   
   // GPS Geofence Coordinate
@@ -98,6 +120,15 @@ export interface CompanyConfig {
   hourlyRateDivider: number; // e.g. 173 (standard Indonesia Depnaker: Gaji Pokok / 173)
   overtimeMultipliers: OvertimeMultiplierRule[];
   minOvertimeMinutes: number; // e.g. 30
+
+  // Special Overtime for Sundays, Specific Days & Tanggal Merah (Otomatis Kalender / Custom)
+  overtimeHolidayMode: 'auto' | 'custom'; // 'auto': ikuti kalender nasional & Minggu; 'custom': kalender/aturan kustom
+  autoSundayOvertime: boolean; // default: true (hari Minggu otomatis tarif lembur libur)
+  autoNationalHolidays: boolean; // default: true (otomatis kalender tanggal merah resmi Indonesia SKB 3 Menteri)
+  includeCutiBersama?: boolean; // default: true (apakah cuti bersama resmi pemerintah otomatis tarif lembur libur)
+  customWeekendDays?: number[]; // Hari istirahat mingguan tertentu (0=Minggu, 1=Senin, ..., 6=Sabtu). Default: [0]
+  holidayOvertimeMultipliers: OvertimeMultiplierRule[]; // Tarif lembur hari libur/Minggu/tanggal merah
+  customHolidays: HolidayOrSpecialDay[]; // Daftar hari libur tertentu / custom perusahaan
   
   // Late penalty per minute (optional)
   latePenaltyPerMinute: number;
@@ -144,6 +175,9 @@ export interface PayrollSummary {
   employeeName: string;
   department: string;
   position: string;
+  salaryType?: 'monthly' | 'daily';
+  dailyRate?: number;
+  dailyBaseEarnings?: number; // Upah pokok akumulasi dari hari hadir (untuk gaji harian)
   baseSalary: number;
   allowance: number;
   attendanceDays: number;
@@ -151,9 +185,22 @@ export interface PayrollSummary {
   totalWorkHours: number;
   totalOvertimeHours: number;
   totalOvertimePay: number;
+  regularOvertimeHours?: number;
+  regularOvertimePay?: number;
+  holidayOvertimeHours?: number;
+  holidayOvertimePay?: number;
   lateDeduction: number;
   grossSalary: number;
   netSalary: number;
+  todayEstimatedSalary?: number;
+  todayBreakdown?: {
+    baseRate: number;
+    transport: number;
+    overtime: number;
+    lateDeduction: number;
+    total: number;
+    status: string;
+  };
 }
 
 export interface WorkReport {
@@ -188,4 +235,24 @@ export interface WorkReportRecommendation {
   priority: 'high' | 'medium' | 'low';
   currentRequiredStatus: boolean;
 }
+
+export interface TemporaryLocationAssignment {
+  id: string;                    // e.g. 'DUTY-2026-001'
+  employeeId: string;
+  employeeName: string;
+  department: string;
+  title: string;                 // e.g. 'Proyek Lapangan Surabaya'
+  locationName: string;          // e.g. 'Kantor Cabang Rungkut'
+  city: string;                  // e.g. 'Surabaya'
+  lat: number;
+  lng: number;
+  radiusMeters: number;          // e.g. 250m
+  startDate: string;             // YYYY-MM-DD
+  endDate: string;               // YYYY-MM-DD
+  status: 'active' | 'completed' | 'cancelled';
+  assignedBy: string;
+  assignedAt: string;
+  notes?: string;
+}
+
 

@@ -1,4 +1,4 @@
-import { AttendanceRecord, CompanyConfig, Employee, PushNotification, Shift, WorkReport } from '../types';
+import { AttendanceRecord, CompanyConfig, Employee, PushNotification, Shift, WorkReport, TemporaryLocationAssignment } from '../types';
 
 export const INITIAL_SHIFTS: Shift[] = [
   {
@@ -32,14 +32,22 @@ export const INITIAL_SHIFTS: Shift[] = [
 ];
 
 export const INITIAL_CONFIG: CompanyConfig = {
+  appName: 'Sistem Presensi & Payroll GPS',
+  appTagline: 'Presensi Real-Time GPS, Lembur Otomatis & Penggajian Terintegrasi',
+  appVersion: 'v3.5 Enterprise GPS',
   companyName: 'PT Nusantara Sinergi Utama',
   companyAddress: 'Gedung Menara Mandiri Lt. 18, Jl. Jend. Sudirman Kav. 54-55, Jakarta Selatan',
+  companyCity: 'Jakarta Selatan, DKI Jakarta',
+  companyPostalCode: '12190',
+  companyIndustry: 'Teknologi Informasi & Rekayasa Konstruksi',
   companyLogo: '', // Can be uploaded or changed by user
   companyPhone: '+62 21 520 8899',
   companyEmail: 'kontak@nusantarasinergi.co.id',
   companyWebsite: 'https://nusantarasinergi.co.id',
   companyDirector: 'Ir. Heru Hendriawan, M.M.',
+  companyDirectorTitle: 'Direktur Utama',
   companyTaxNumber: '01.234.567.8-012.000',
+  companyStampUrl: '',
   allowRemoteOutIslandAttendance: true,
   // Default coordinate: Sudirman Jakarta (-6.2232, 106.8093)
   officeLat: -6.2232,
@@ -55,6 +63,36 @@ export const INITIAL_CONFIG: CompanyConfig = {
     { tier: 2, multiplier: 2.0, description: 'Jam ke-2 dan seterusnya (2.0x Gaji Per Jam)' },
   ],
   minOvertimeMinutes: 30,
+
+  // Special Overtime for Sundays & Indonesian National / Custom Holidays
+  overtimeHolidayMode: 'auto',
+  autoSundayOvertime: true,
+  autoNationalHolidays: true,
+  includeCutiBersama: true,
+  customWeekendDays: [0], // 0 = Minggu (Hari istirahat mingguan)
+  holidayOvertimeMultipliers: [
+    { tier: 1, multiplier: 2.0, description: 'Jam ke-1 s/d jam ke-7/8 (2.0x Upah Per Jam)' },
+    { tier: 2, multiplier: 3.0, description: 'Jam ke-8/9 (3.0x Upah Per Jam)' },
+    { tier: 3, multiplier: 4.0, description: 'Jam ke-9+ dan seterusnya (4.0x Upah Per Jam)' },
+  ],
+  customHolidays: [
+    {
+      id: 'CUSTOM-HOL-01',
+      date: '2026-09-04',
+      name: 'Hari Ulang Tahun Perusahaan ke-15',
+      type: 'custom',
+      description: 'Hari libur resmi internal perusahaan',
+      customMultiplier: 2.5,
+    },
+    {
+      id: 'CUSTOM-HOL-02',
+      date: '2026-09-28',
+      name: 'Cuti Bersama Khusus Perusahaan',
+      type: 'custom',
+      description: 'Penyesuaian operasional lapangan akhir kuartal',
+    },
+  ],
+
   latePenaltyPerMinute: 1000, // Rp 1.000 / menit terlambat
   
   spreadsheetWebhookUrl: 'https://script.google.com/macros/s/AKfycbxExampleSpreadsheetWebhook/exec',
@@ -320,6 +358,27 @@ export const INITIAL_ATTENDANCES: AttendanceRecord[] = [
     notes: 'Lembur monitoring arsitektur cloud',
   },
   {
+    id: 'ATT-20260906-001',
+    employeeId: 'EMP001',
+    employeeName: 'Budi Santoso',
+    department: 'IT & Digital',
+    date: '2026-09-06', // Hari Minggu
+    checkInTime: '08:00:00',
+    checkOutTime: '14:00:00',
+    checkInLat: -6.2232,
+    checkInLng: 106.8093,
+    checkInDistanceMeters: 12,
+    checkOutLat: -6.2232,
+    checkOutLng: 106.8093,
+    checkOutDistanceMeters: 10,
+    status: 'lembur',
+    workDurationHours: 6.0,
+    overtimeHours: 6.0,
+    overtimePay: 867052, // 6 jam x 2.0x x (12.500.000 / 173) = 867.052 (Tarif Lembur Hari Minggu)
+    isOvertimeApproved: true,
+    notes: 'Lembur Hari Minggu (Tarif 2x): Maintenance berkala data center & security audit',
+  },
+  {
     id: 'ATT-20260901-002',
     employeeId: 'EMP002',
     employeeName: 'Siti Rahmawati',
@@ -446,4 +505,44 @@ export const INITIAL_WORK_REPORTS: WorkReport[] = [
     status: 'submitted',
   },
 ];
+
+export const INITIAL_ASSIGNMENTS: TemporaryLocationAssignment[] = [
+  {
+    id: 'DUTY-2026-001',
+    employeeId: 'EMP003',
+    employeeName: 'Ahmad Fauzi',
+    department: 'Operasional',
+    title: 'Penugasan Lapangan Instalasi Proyek Surabaya',
+    locationName: 'Gedung Pergudangan Rungkut Industri',
+    city: 'Surabaya',
+    lat: -7.3245,
+    lng: 112.7682,
+    radiusMeters: 300,
+    startDate: '2026-09-15',
+    endDate: '2026-09-25',
+    status: 'active',
+    assignedBy: 'Admin HRD',
+    assignedAt: '2026-09-14 10:00',
+    notes: 'Surat Perintah Tugas No: SPT/2026/OPS-0914. Pengawasan integrasi sensor logistik & dispatch.',
+  },
+  {
+    id: 'DUTY-2026-002',
+    employeeId: 'EMP005',
+    employeeName: 'Rian Hidayat',
+    department: 'Logistik',
+    title: 'Audit Fasilitas Gudang Distribusi Bandung',
+    locationName: 'Sentra Logistik Soekarno-Hatta',
+    city: 'Bandung',
+    lat: -6.9389,
+    lng: 107.6322,
+    radiusMeters: 250,
+    startDate: '2026-09-18',
+    endDate: '2026-09-22',
+    status: 'active',
+    assignedBy: 'Admin HRD',
+    assignedAt: '2026-09-17 14:30',
+    notes: 'Surat Tugas No: SPT/2026/LOG-0917. Pengecekan armada dan sistem RFID gudang Jawa Barat.',
+  },
+];
+
 

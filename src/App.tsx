@@ -8,7 +8,8 @@ import {
   EmailLog, 
   Shift,
   PayrollSummary,
-  WorkReport 
+  WorkReport,
+  TemporaryLocationAssignment
 } from './types';
 import { 
   INITIAL_CONFIG, 
@@ -16,7 +17,8 @@ import {
   INITIAL_ATTENDANCES, 
   INITIAL_NOTIFICATIONS, 
   INITIAL_SHIFTS,
-  INITIAL_WORK_REPORTS 
+  INITIAL_WORK_REPORTS,
+  INITIAL_ASSIGNMENTS
 } from './data/mockData';
 import { Navbar } from './components/Navbar';
 import { LoginModal } from './components/LoginModal';
@@ -29,6 +31,7 @@ import { ChangeAdminPasswordModal } from './components/ChangeAdminPasswordModal'
 import { computeEmployeePayroll } from './utils/payroll';
 import { syncToSpreadsheetWebhook } from './utils/sheetsSync';
 import { createEmailAlert } from './utils/emailNotifier';
+import { sanitizeUniqueEmployees } from './utils/employeeUtils';
 import { CheckCircle2, Shield, User, AlertTriangle, LogIn, Lock, Sparkles } from 'lucide-react';
 
 export default function App() {
@@ -66,7 +69,9 @@ export default function App() {
 
   const [employees, setEmployees] = useState<Employee[]>(() => {
     const saved = localStorage.getItem('app_employees');
-    return saved ? JSON.parse(saved) : INITIAL_EMPLOYEES;
+    const raw = saved ? JSON.parse(saved) : INITIAL_EMPLOYEES;
+    const { employees: cleaned } = sanitizeUniqueEmployees(raw);
+    return cleaned;
   });
 
   const [shifts, setShifts] = useState<Shift[]>(() => {
@@ -82,6 +87,11 @@ export default function App() {
   const [workReports, setWorkReports] = useState<WorkReport[]>(() => {
     const saved = localStorage.getItem('app_work_reports');
     return saved ? JSON.parse(saved) : INITIAL_WORK_REPORTS;
+  });
+
+  const [assignments, setAssignments] = useState<TemporaryLocationAssignment[]>(() => {
+    const saved = localStorage.getItem('app_temporary_assignments');
+    return saved ? JSON.parse(saved) : INITIAL_ASSIGNMENTS;
   });
 
   const [notifications, setNotifications] = useState<PushNotification[]>(() => {
@@ -116,6 +126,9 @@ export default function App() {
   const [isSpreadsheetModalOpen, setIsSpreadsheetModalOpen] = useState(false);
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [adminActiveTab, setAdminActiveTab] = useState<
+    'live-employees' | 'attendance-maps' | 'attendance' | 'attendance-charts' | 'payroll' | 'holiday-overtime' | 'rules' | 'company-profile' | 'sheets' | 'reports' | 'employees' | 'work-reports'
+  >('live-employees');
 
   // Persistence to localStorage
   useEffect(() => {
@@ -142,11 +155,41 @@ export default function App() {
     localStorage.setItem('app_notifications', JSON.stringify(notifications));
   }, [notifications]);
 
+  useEffect(() => {
+    localStorage.setItem('app_temporary_assignments', JSON.stringify(assignments));
+  }, [assignments]);
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => {
       setToastMessage(null);
     }, 4000);
+  };
+
+  // Assignment handlers
+  const handleSaveAssignment = (newAssignment: TemporaryLocationAssignment) => {
+    setAssignments((prev) => {
+      const idx = prev.findIndex((a) => a.id === newAssignment.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = newAssignment;
+        return next;
+      }
+      return [newAssignment, ...prev];
+    });
+    showToast(`Penugasan "${newAssignment.title}" berhasil disimpan!`);
+  };
+
+  const handleUpdateAssignmentStatus = (id: string, status: 'active' | 'completed' | 'cancelled') => {
+    setAssignments((prev) =>
+      prev.map((a) => (a.id === id ? { ...a, status } : a))
+    );
+    showToast(`Status penugasan telah diperbarui menjadi: ${status}.`);
+  };
+
+  const handleDeleteAssignment = (id: string) => {
+    setAssignments((prev) => prev.filter((a) => a.id !== id));
+    showToast('Penugasan berhasil dihapus dari sistem.');
   };
 
   // Submit Work Report handler
@@ -213,6 +256,19 @@ export default function App() {
 
   // CheckIn handler
   const handleCheckIn = (recordData: Partial<AttendanceRecord>) => {
+    // Parent Geofence Enforcement: check against office or assignment radius
+    const activeDuty = assignments.find(
+      (a) => a.employeeId === recordData.employeeId && a.status === 'active' &&
+      (recordData.date || new Date().toISOString().slice(0, 10)) >= a.startDate &&
+      (recordData.date || new Date().toISOString().slice(0, 10)) <= a.endDate
+    );
+    const maxRadius = activeDuty ? activeDuty.radiusMeters : config.officeRadiusMeters;
+
+    if (recordData.checkInDistanceMeters !== undefined && recordData.checkInDistanceMeters > maxRadius) {
+      showToast(`Gagal: Check-In ditolak karena berada di luar radius resmi (${recordData.checkInDistanceMeters}m > batas ${maxRadius}m)`);
+      return;
+    }
+
     const newId = `ATT-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Date.now().toString().slice(-4)}`;
     const newRecord: AttendanceRecord = {
       id: newId,
@@ -249,6 +305,21 @@ export default function App() {
 
   // CheckOut handler
   const handleCheckOut = (recordId: string, checkOutData: Partial<AttendanceRecord>) => {
+    const existing = attendanceRecords.find((r) => r.id === recordId);
+    if (!existing) return;
+
+    // Parent Geofence Enforcement for checkout
+    const activeDuty = assignments.find(
+      (a) => a.employeeId === existing.employeeId && a.status === 'active' &&
+      existing.date >= a.startDate && existing.date <= a.endDate
+    );
+    const maxRadius = activeDuty ? activeDuty.radiusMeters : config.officeRadiusMeters;
+
+    if (checkOutData.checkOutDistanceMeters !== undefined && checkOutData.checkOutDistanceMeters > maxRadius) {
+      showToast(`Gagal: Check-Out ditolak karena berada di luar radius resmi (${checkOutData.checkOutDistanceMeters}m > batas ${maxRadius}m)`);
+      return;
+    }
+
     let completedRecord: AttendanceRecord | null = null;
 
     setAttendanceRecords((prev) =>
@@ -359,6 +430,38 @@ export default function App() {
     showToast('Kebijakan dan konfigurasi perusahaan berhasil disimpan!');
   };
 
+  // Handle Employee Updates with guaranteed unique IDs and synchronization
+  const handleUpdateEmployees = (updatedList: Employee[]) => {
+    const { employees: sanitized, hasChanges, idChanges } = sanitizeUniqueEmployees(updatedList);
+    setEmployees(sanitized);
+
+    // If any IDs changed, synchronize attendance records and work reports
+    if (hasChanges && Object.keys(idChanges).length > 0) {
+      setAttendanceRecords((prev) =>
+        prev.map((rec) => {
+          const newId = idChanges[rec.employeeId.toUpperCase()];
+          return newId ? { ...rec, employeeId: newId } : rec;
+        })
+      );
+      setWorkReports((prev) =>
+        prev.map((rep) => {
+          const newId = idChanges[rep.employeeId.toUpperCase()];
+          return newId ? { ...rep, employeeId: newId } : rep;
+        })
+      );
+    }
+
+    // Keep logged-in currentEmployee in sync
+    if (currentEmployee) {
+      const match = sanitized.find(
+        (e) => e.id.trim().toUpperCase() === currentEmployee.id.trim().toUpperCase()
+      );
+      if (match) {
+        setCurrentEmployee(match);
+      }
+    }
+  };
+
   const unreadNotifCount = notifications.filter((n) => !n.read).length;
 
   return (
@@ -375,6 +478,7 @@ export default function App() {
         onOpenEmailLogs={() => setIsEmailLogOpen(true)}
         onOpenSpreadsheetModal={() => setIsSpreadsheetModalOpen(true)}
         onOpenChangePassword={() => setIsChangePasswordModalOpen(true)}
+        onOpenCompanyProfile={() => setAdminActiveTab('company-profile')}
         onSwitchUser={() => setIsLoginModalOpen(true)}
         onLogout={handleLogout}
         isSyncingSheets={isSyncingSheets}
@@ -415,22 +519,29 @@ export default function App() {
             config={config}
             attendanceRecords={attendanceRecords}
             workReports={workReports}
+            assignments={assignments}
             onSubmitWorkReport={handleSubmitWorkReport}
             onCheckIn={handleCheckIn}
             onCheckOut={handleCheckOut}
           />
         ) : (
           <AdminDashboard
+            key={adminActiveTab}
+            initialTab={adminActiveTab}
             config={config}
             onUpdateConfig={handleUpdateConfig}
             employees={employees}
-            onUpdateEmployees={setEmployees}
+            onUpdateEmployees={handleUpdateEmployees}
             attendanceRecords={attendanceRecords}
             onUpdateAttendanceRecords={setAttendanceRecords}
             shifts={shifts}
             onUpdateShifts={setShifts}
             workReports={workReports}
             onUpdateWorkReports={setWorkReports}
+            assignments={assignments}
+            onSaveAssignment={handleSaveAssignment}
+            onUpdateAssignmentStatus={handleUpdateAssignmentStatus}
+            onDeleteAssignment={handleDeleteAssignment}
             onManualSyncSheets={handleManualSyncSheets}
             isSyncingSheets={isSyncingSheets}
             onTriggerEmailAlert={handleTriggerEmailAlert}
@@ -443,9 +554,9 @@ export default function App() {
       <footer className="mt-auto py-5 border-t border-slate-200 bg-white/90 backdrop-blur-xs text-xs text-slate-500">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-center sm:text-left">
-            <span className="font-bold text-slate-800 tracking-tight">{config.companyName}</span>
+            <span className="font-bold text-slate-800 tracking-tight">{config.appName || config.companyName}</span>
             <span className="text-slate-300">•</span>
-            <span className="text-slate-500 text-[11px]">Sistem Presensi GPS & Penggajian Terintegrasi</span>
+            <span className="text-slate-500 text-[11px]">{config.appTagline || `${config.companyName} - Presensi GPS & Penggajian`}</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-100 border border-slate-200 text-slate-700 font-medium text-[11px] shadow-2xs">

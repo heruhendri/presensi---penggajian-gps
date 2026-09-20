@@ -1,4 +1,5 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
+import L from 'leaflet';
 import {
   MapPin,
   Building2,
@@ -21,7 +22,9 @@ import {
   LogOut,
   Radio,
   User,
-  ArrowUpRight
+  ArrowUpRight,
+  Crosshair,
+  Map as MapIcon
 } from 'lucide-react';
 import { AttendanceRecord, CompanyConfig, Employee, Shift } from '../types';
 
@@ -40,19 +43,24 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
   shifts,
   initialSelectedEmployeeId,
 }) => {
-  const [mapEngine, setMapEngine] = useState<'google' | 'google-satellite' | 'radar'>('google');
-  const [googleZoom, setGoogleZoom] = useState<number>(16);
+  // Map engine: Google Roadmap, Google Satellite Hybrid, OpenStreetMap, or Futuristic Radar
+  const [mapEngine, setMapEngine] = useState<'google' | 'google-satellite' | 'osm' | 'radar'>('google');
   const [zoomLevel, setZoomLevel] = useState<number>(1.0);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  const [mapTheme, setMapTheme] = useState<'dark' | 'blueprint' | 'satellite'>('dark');
+  const [mapTheme, setMapTheme] = useState<'dark' | 'blueprint'>('dark');
   const [statusFilter, setStatusFilter] = useState<'all' | 'working' | 'out_radius' | 'checked_out'>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string | null>(initialSelectedEmployeeId || null);
   const [selectedRecordType, setSelectedRecordType] = useState<'checkin' | 'checkout'>('checkin');
 
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const leafletMapRef = useRef<L.Map | null>(null);
+  const tileLayerRef = useRef<L.TileLayer | null>(null);
+  const markersLayerRef = useRef<L.LayerGroup | null>(null);
+  const markersMapRef = useRef<Map<string, L.Marker>>(new Map());
   const svgRef = useRef<SVGSVGElement | null>(null);
 
   // Filter attendance records for today (or latest records)
@@ -62,7 +70,7 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
     const directToday = attendanceRecords.filter((a) => a.date === todayStr);
     if (directToday.length > 0) return directToday;
 
-    // Fallback to the latest available records so the map is never empty in demo
+    // Fallback to latest available records so the map is populated in demonstration
     const uniqueByEmp = new Map<string, AttendanceRecord>();
     const sorted = [...attendanceRecords].sort((a, b) => b.date.localeCompare(a.date));
     sorted.forEach((rec) => {
@@ -76,10 +84,11 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
   // Combine employee data with their attendance record and coordinates
   const employeeMapData = useMemo(() => {
     return employees.map((emp) => {
-      const record = todayRecords.find((r) => r.employeeId === emp.id);
+      const record = todayRecords.find(
+        (r) => r.employeeId.trim().toUpperCase() === emp.id.trim().toUpperCase()
+      );
       const shift = shifts.find((s) => s.id === emp.currentShiftId) || shifts[0];
 
-      // Determine GPS location: checkInLat/Lng or simulated slight variation if recorded
       const checkInLat = record?.checkInLat;
       const checkInLng = record?.checkInLng;
       const checkOutLat = record?.checkOutLat;
@@ -141,7 +150,9 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
   // Selected item object
   const selectedItem = useMemo(() => {
     if (!selectedEmployeeId) return null;
-    return employeeMapData.find((item) => item.employee.id === selectedEmployeeId) || null;
+    return employeeMapData.find(
+      (item) => item.employee.id.trim().toUpperCase() === selectedEmployeeId.trim().toUpperCase()
+    ) || null;
   }, [employeeMapData, selectedEmployeeId]);
 
   // Office center coordinate
@@ -149,35 +160,7 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
   const officeLng = config.officeLng || 106.8093;
   const officeRadius = config.officeRadiusMeters || 100;
 
-  // Map canvas sizing
-  const viewBoxWidth = 1000;
-  const viewBoxHeight = 700;
-  const centerX = viewBoxWidth / 2;
-  const centerY = viewBoxHeight / 2;
-
-  // Projection: convert delta meters to SVG pixels
-  // At zoom 1.0, 100 meters = 120 pixels in SVG
-  const baseScale = 1.2 * zoomLevel; // pixels per meter
-
-  const metersToSvg = (meters: number) => meters * baseScale;
-
-  // Convert (lat, lng) to SVG coordinates relative to office center
-  const coordsToSvg = (lat: number, lng: number) => {
-    const deltaLat = lat - officeLat;
-    const deltaLng = lng - officeLng;
-
-    // 1 deg lat = ~111,320 meters
-    const deltaY_meters = deltaLat * 111320;
-    // 1 deg lng = ~111,320 * cos(lat) meters
-    const deltaX_meters = deltaLng * 111320 * Math.cos((officeLat * Math.PI) / 180);
-
-    const x = centerX + deltaX_meters * baseScale + panOffset.x;
-    const y = centerY - deltaY_meters * baseScale + panOffset.y;
-
-    return { x, y, deltaX_meters, deltaY_meters };
-  };
-
-  // Active GPS coordinates for Google Maps & focus
+  // Active GPS coordinates for focus
   const activeLat = selectedItem
     ? (selectedRecordType === 'checkin' ? selectedItem.record?.checkInLat : selectedItem.record?.checkOutLat) || officeLat
     : officeLat;
@@ -185,35 +168,320 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
     ? (selectedRecordType === 'checkin' ? selectedItem.record?.checkInLng : selectedItem.record?.checkOutLng) || officeLng
     : officeLng;
 
-  // Google Maps Zoom
-  const handleGoogleZoomIn = () => setGoogleZoom((prev) => Math.min(prev + 1, 21));
-  const handleGoogleZoomOut = () => setGoogleZoom((prev) => Math.max(prev - 1, 4));
+  // Quick stats
+  const totalCheckedIn = employeeMapData.filter((e) => e.hasCheckIn).length;
+  const totalInRadius = employeeMapData.filter((e) => e.statusType === 'working').length;
+  const totalOutRadius = employeeMapData.filter((e) => e.statusType === 'out_radius').length;
+  const totalCheckedOut = employeeMapData.filter((e) => e.statusType === 'checked_out').length;
 
-  // Zoom controls
+  // -------------------------------------------------------------
+  // LEAFLET GOOGLE MAPS INTEGRATION
+  // -------------------------------------------------------------
+  useEffect(() => {
+    if (mapEngine === 'radar' || !mapContainerRef.current) {
+      if (leafletMapRef.current) {
+        leafletMapRef.current.remove();
+        leafletMapRef.current = null;
+        markersLayerRef.current = null;
+        tileLayerRef.current = null;
+        markersMapRef.current.clear();
+      }
+      return;
+    }
+
+    // Initialize Leaflet map if not yet created
+    if (!leafletMapRef.current) {
+      const map = L.map(mapContainerRef.current, {
+        zoomControl: false,
+        attributionControl: true,
+      }).setView([officeLat, officeLng], 16);
+
+      leafletMapRef.current = map;
+      markersLayerRef.current = L.layerGroup().addTo(map);
+    }
+
+    const map = leafletMapRef.current;
+
+    // Remove previous tile layer if any
+    if (tileLayerRef.current) {
+      map.removeLayer(tileLayerRef.current);
+    }
+
+    // Determine tile URL based on mapEngine
+    let tileUrl = 'https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}';
+    let attribution = '&copy; Google Maps';
+    let maxZoom = 21;
+
+    if (mapEngine === 'google-satellite') {
+      // Google Hybrid (Satellite + Roads + Labels)
+      tileUrl = 'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}';
+      attribution = '&copy; Google Maps Satelit Hybrid';
+      maxZoom = 21;
+    } else if (mapEngine === 'osm') {
+      tileUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+      attribution = '&copy; OpenStreetMap contributors';
+      maxZoom = 19;
+    }
+
+    const tileLayer = L.tileLayer(tileUrl, {
+      maxZoom,
+      attribution,
+      subdomains: mapEngine.startsWith('google') ? ['mt0', 'mt1', 'mt2', 'mt3'] : ['a', 'b', 'c'],
+    }).addTo(map);
+
+    tileLayerRef.current = tileLayer;
+
+    // Force map to invalidate size on render
+    setTimeout(() => {
+      map.invalidateSize();
+    }, 150);
+
+    return () => {
+      // Keep map instance alive across rerenders unless engine changes to radar
+    };
+  }, [mapEngine, officeLat, officeLng]);
+
+  // Render Markers and Geofence on the Leaflet Map
+  useEffect(() => {
+    if (mapEngine === 'radar' || !leafletMapRef.current || !markersLayerRef.current) return;
+
+    const map = leafletMapRef.current;
+    const layerGroup = markersLayerRef.current;
+    layerGroup.clearLayers();
+    markersMapRef.current.clear();
+
+    // 1. Office Center Marker & Geofence Circle
+    const officeIcon = L.divIcon({
+      className: 'custom-office-pin',
+      html: `
+        <div style="position: relative; display: flex; flex-direction: column; align-items: center; cursor: pointer;">
+          <div style="position: absolute; width: 48px; height: 48px; border-radius: 50%; background: rgba(16, 185, 129, 0.25); animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
+          <div style="width: 38px; height: 38px; border-radius: 12px; background: #0f172a; border: 3px solid #10b981; display: flex; align-items: center; justify-content: center; box-shadow: 0 10px 25px rgba(0,0,0,0.5); z-index: 10;">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></svg>
+          </div>
+          <div style="background: #0f172a; border: 1.5px solid #10b981; color: white; font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 9999px; margin-top: 4px; white-space: nowrap; box-shadow: 0 4px 10px rgba(0,0,0,0.4); z-index: 10;">
+            🏢 ${config.companyName}
+          </div>
+        </div>
+      `,
+      iconSize: [48, 64],
+      iconAnchor: [24, 30],
+    });
+
+    const officeMarker = L.marker([officeLat, officeLng], { icon: officeIcon }).addTo(layerGroup);
+    officeMarker.bindPopup(`
+      <div style="font-family: sans-serif; padding: 4px;">
+        <div style="font-weight: bold; color: #0f172a; font-size: 13px;">🏢 Kantor Pusat: ${config.companyName}</div>
+        <div style="color: #64748b; font-size: 11px; margin-top: 2px;">Titik Pusat Geofence Presensi GPS</div>
+        <div style="margin-top: 6px; font-size: 11px; background: #ecfdf5; color: #047857; padding: 4px 8px; border-radius: 6px; font-weight: 600;">
+          Radius Terverifikasi: ${officeRadius} Meter
+        </div>
+      </div>
+    `);
+
+    // Geofence Circle Overlay
+    L.circle([officeLat, officeLng], {
+      radius: officeRadius,
+      color: '#10b981',
+      fillColor: '#10b981',
+      fillOpacity: 0.16,
+      weight: 2,
+      dashArray: '6, 6',
+    }).addTo(layerGroup);
+
+    // 2. LIVE WORKER DOTS & PINS
+    filteredMapData.forEach((item) => {
+      const lat =
+        selectedRecordType === 'checkout' && item.checkOutLat
+          ? item.checkOutLat
+          : item.checkInLat || officeLat;
+      const lng =
+        selectedRecordType === 'checkout' && item.checkOutLng
+          ? item.checkOutLng
+          : item.checkInLng || officeLng;
+
+      const isSelected = selectedEmployeeId === item.employee.id;
+
+      // Color scheme
+      const pinColor =
+        item.statusType === 'checked_out'
+          ? '#3b82f6'
+          : item.statusType === 'out_radius'
+          ? '#f59e0b'
+          : '#10b981';
+
+      const statusLabel =
+        item.statusType === 'checked_out'
+          ? 'Pulang (Check-Out)'
+          : item.statusType === 'out_radius'
+          ? 'Luar Radius / WFA'
+          : 'Dalam Radius Kantor';
+
+      const initials = item.employee.name
+        .split(' ')
+        .map((n) => n[0])
+        .slice(0, 2)
+        .join('');
+
+      const firstName = item.employee.name.split(' ')[0];
+
+      // Custom Pin Marker with Live Pulse Ring & Name Badge
+      const workerIcon = L.divIcon({
+        className: 'custom-worker-pin',
+        html: `
+          <div style="position: relative; display: flex; flex-direction: column; align-items: center; cursor: pointer; transform: ${isSelected ? 'scale(1.2)' : 'scale(1)'}; transition: transform 0.2s;">
+            <!-- Live Pulse Dot Animation -->
+            <div style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; margin: auto; width: 44px; height: 44px; border-radius: 50%; background: ${pinColor}; opacity: 0.35; animation: ping 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
+            
+            <!-- Core Marker Pin Bubble -->
+            <div style="width: 32px; height: 32px; border-radius: 50%; background: #0f172a; border: 3px solid ${pinColor}; display: flex; align-items: center; justify-content: center; color: #ffffff; font-weight: 900; font-size: 11px; box-shadow: 0 8px 20px rgba(0,0,0,0.6); z-index: 20; position: relative;">
+              ${initials}
+              <!-- Small live status indicator dot -->
+              <span style="position: absolute; top: -2px; right: -2px; width: 10px; height: 10px; border-radius: 50%; background: ${pinColor}; border: 2px solid #0f172a;"></span>
+            </div>
+
+            <!-- Name and Distance Pill -->
+            <div style="background: rgba(15, 23, 42, 0.95); border: 1.5px solid ${pinColor}; color: #ffffff; font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: 9999px; margin-top: 3px; white-space: nowrap; box-shadow: 0 4px 10px rgba(0,0,0,0.4); z-index: 20;">
+              ${firstName} • ${item.distanceMeters}m
+            </div>
+          </div>
+        `,
+        iconSize: [44, 56],
+        iconAnchor: [22, 28],
+      });
+
+      const marker = L.marker([lat, lng], { icon: workerIcon, zIndexOffset: isSelected ? 1000 : 100 }).addTo(layerGroup);
+      markersMapRef.current.set(item.employee.id, marker);
+
+      // Popup with full details
+      const popupHtml = `
+        <div style="font-family: sans-serif; padding: 6px; min-width: 220px;">
+          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+            <div style="width: 28px; height: 28px; border-radius: 8px; background: #0f172a; color: white; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 11px; border: 2px solid ${pinColor};">
+              ${initials}
+            </div>
+            <div>
+              <div style="font-weight: 800; color: #0f172a; font-size: 12px; line-height: 1.2;">${item.employee.name}</div>
+              <div style="color: #64748b; font-size: 10px;">ID: <strong>${item.employee.id}</strong> • ${item.employee.department}</div>
+            </div>
+          </div>
+          
+          <div style="background: ${pinColor}15; color: ${pinColor}; font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 6px; margin-bottom: 6px; border: 1px solid ${pinColor}40;">
+            ● ${statusLabel} (${item.distanceMeters}m dari kantor)
+          </div>
+
+          <div style="font-size: 11px; color: #334155; line-height: 1.5; margin-bottom: 8px;">
+            <div>🕒 Jam Masuk: <strong>${item.record?.checkInTime || '-'} WIB</strong></div>
+            ${item.record?.checkOutTime ? `<div>🕒 Jam Pulang: <strong>${item.record.checkOutTime} WIB</strong></div>` : ''}
+            <div>📍 Koordinat: <span style="font-family: monospace; font-size: 10px;">${lat.toFixed(5)}, ${lng.toFixed(5)}</span></div>
+            <div style="color: #64748b; font-size: 10px; margin-top: 2px;">Shift: ${item.shift.name}</div>
+          </div>
+
+          <div style="display: flex; gap: 4px; border-top: 1px solid #e2e8f0; padding-top: 6px;">
+            <a href="https://www.google.com/maps/search/?api=1&query=${lat},${lng}" target="_blank" rel="noreferrer" style="flex: 1; text-align: center; background: #0f172a; color: white; padding: 5px; border-radius: 6px; font-size: 10px; font-weight: bold; text-decoration: none;">
+              Buka Google Maps ↗
+            </a>
+          </div>
+        </div>
+      `;
+
+      marker.bindPopup(popupHtml);
+
+      marker.on('click', () => {
+        setSelectedEmployeeId(item.employee.id);
+      });
+    });
+
+    // If an employee is selected, center on them
+    if (selectedEmployeeId && markersMapRef.current.has(selectedEmployeeId)) {
+      const targetMarker = markersMapRef.current.get(selectedEmployeeId);
+      if (targetMarker) {
+        map.panTo(targetMarker.getLatLng(), { animate: true, duration: 0.8 });
+        targetMarker.openPopup();
+      }
+    }
+  }, [filteredMapData, selectedEmployeeId, selectedRecordType, mapEngine, officeLat, officeLng, officeRadius, config.companyName]);
+
+  // Handle focus on selected employee
+  const handleFocusEmployee = (empId: string) => {
+    setSelectedEmployeeId(empId);
+    if (mapEngine !== 'radar' && leafletMapRef.current && markersMapRef.current.has(empId)) {
+      const marker = markersMapRef.current.get(empId);
+      if (marker) {
+        leafletMapRef.current.flyTo(marker.getLatLng(), 17, { duration: 1 });
+        marker.openPopup();
+      }
+    }
+  };
+
+  // Center on Office
+  const handleCenterOffice = () => {
+    setSelectedEmployeeId(null);
+    if (mapEngine !== 'radar' && leafletMapRef.current) {
+      leafletMapRef.current.flyTo([officeLat, officeLng], 16, { duration: 1 });
+    } else {
+      setZoomLevel(1.0);
+      setPanOffset({ x: 0, y: 0 });
+    }
+  };
+
+  // Fit Bounds to Show All Workers
+  const handleFitAllMarkers = () => {
+    if (mapEngine !== 'radar' && leafletMapRef.current && markersLayerRef.current) {
+      const map = leafletMapRef.current;
+      const points: L.LatLngExpression[] = [[officeLat, officeLng]];
+      filteredMapData.forEach((item) => {
+        const lat =
+          selectedRecordType === 'checkout' && item.checkOutLat
+            ? item.checkOutLat
+            : item.checkInLat || officeLat;
+        const lng =
+          selectedRecordType === 'checkout' && item.checkOutLng
+            ? item.checkOutLng
+            : item.checkInLng || officeLng;
+        points.push([lat, lng]);
+      });
+      if (points.length > 0) {
+        map.fitBounds(L.latLngBounds(points), { padding: [50, 50], maxZoom: 18 });
+      }
+    }
+  };
+
+  // Zoom controls for Leaflet / Radar
   const handleZoomIn = () => {
-    if (mapEngine !== 'radar') {
-      handleGoogleZoomIn();
+    if (mapEngine !== 'radar' && leafletMapRef.current) {
+      leafletMapRef.current.zoomIn();
     } else {
       setZoomLevel((prev) => Math.min(prev * 1.25, 4.0));
     }
   };
 
   const handleZoomOut = () => {
-    if (mapEngine !== 'radar') {
-      handleGoogleZoomOut();
+    if (mapEngine !== 'radar' && leafletMapRef.current) {
+      leafletMapRef.current.zoomOut();
     } else {
       setZoomLevel((prev) => Math.max(prev * 0.8, 0.4));
     }
   };
 
-  const handleResetView = () => {
-    setZoomLevel(1.0);
-    setGoogleZoom(16);
-    setPanOffset({ x: 0, y: 0 });
-    setSelectedEmployeeId(null);
+  // Radar Geofence SVG calculation
+  const viewBoxWidth = 1000;
+  const viewBoxHeight = 700;
+  const centerX = viewBoxWidth / 2;
+  const centerY = viewBoxHeight / 2;
+  const baseScale = 1.2 * zoomLevel;
+  const metersToSvg = (meters: number) => meters * baseScale;
+
+  const coordsToSvg = (lat: number, lng: number) => {
+    const deltaLat = lat - officeLat;
+    const deltaLng = lng - officeLng;
+    const deltaY_meters = deltaLat * 111320;
+    const deltaX_meters = deltaLng * 111320 * Math.cos((officeLat * Math.PI) / 180);
+    const x = centerX + deltaX_meters * baseScale + panOffset.x;
+    const y = centerY - deltaY_meters * baseScale + panOffset.y;
+    return { x, y, deltaX_meters, deltaY_meters };
   };
 
-  // Drag to pan map
   const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
     setIsDragging(true);
     setDragStart({ x: e.clientX - panOffset.x, y: e.clientY - panOffset.y });
@@ -229,38 +497,31 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
 
   const handleMouseUp = () => setIsDragging(false);
 
-  // Quick stats
-  const totalCheckedIn = employeeMapData.filter((e) => e.hasCheckIn).length;
-  const totalInRadius = employeeMapData.filter((e) => e.statusType === 'working').length;
-  const totalOutRadius = employeeMapData.filter((e) => e.statusType === 'out_radius').length;
-  const totalCheckedOut = employeeMapData.filter((e) => e.statusType === 'checked_out').length;
-
   return (
     <div className="space-y-4 animate-in fade-in duration-200">
       {/* Top Header Card */}
       <div className="bg-slate-900 text-white rounded-2xl p-4 sm:p-6 border border-slate-800 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="space-y-1">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center">
-              <Compass className="w-5 h-5 animate-spin-slow" />
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center shrink-0">
+              <Crosshair className="w-5 h-5 animate-pulse" />
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-black tracking-tight text-white flex items-center gap-2">
-                <span>Peta Presensi GPS Check-In & Check-Out</span>
+                <span>Peta Presensi GPS & Titik Live Pekerja</span>
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                  Radar Geofence Live
+                  Live Points Aktif
                 </span>
               </h2>
               <p className="text-xs text-slate-400">
-                Visualisasi titik koordinat presensi masuk, pulang, dan radius zona kantor ({config.companyName}).
+                Visualisasi titik-titik koordinat pekerja secara langsung pada Google Maps dan zona radius kantor ({config.companyName}).
               </p>
             </div>
           </div>
         </div>
 
-        {/* Quick Map Controls & Engine Switcher */}
+        {/* Map Engine Selector */}
         <div className="flex flex-wrap items-center gap-2">
-          {/* Map Engine Selector */}
           <div className="inline-flex rounded-xl bg-slate-800 p-1 border border-slate-700 text-xs">
             <button
               type="button"
@@ -284,6 +545,16 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
             </button>
             <button
               type="button"
+              onClick={() => setMapEngine('osm')}
+              className={`px-3 py-1.5 rounded-lg font-bold flex items-center gap-1.5 transition cursor-pointer ${
+                mapEngine === 'osm' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              <MapIcon className="w-3.5 h-3.5 text-blue-400" />
+              <span>OpenStreetMap</span>
+            </button>
+            <button
+              type="button"
               onClick={() => setMapEngine('radar')}
               className={`px-3 py-1.5 rounded-lg font-bold flex items-center gap-1.5 transition cursor-pointer ${
                 mapEngine === 'radar' ? 'bg-emerald-600 text-white shadow-xs' : 'text-slate-300 hover:text-white'
@@ -294,44 +565,33 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
             </button>
           </div>
 
-          {/* Theme Selector (only if Radar Geofence is active) */}
-          {mapEngine === 'radar' && (
-            <div className="inline-flex rounded-xl bg-slate-800 p-1 border border-slate-700 text-xs">
-              <button
-                type="button"
-                onClick={() => setMapTheme('dark')}
-                className={`px-2.5 py-1 rounded-lg font-bold transition cursor-pointer ${
-                  mapTheme === 'dark' ? 'bg-slate-950 text-emerald-400 shadow-xs' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                Dark
-              </button>
-              <button
-                type="button"
-                onClick={() => setMapTheme('blueprint')}
-                className={`px-2.5 py-1 rounded-lg font-bold transition cursor-pointer ${
-                  mapTheme === 'blueprint' ? 'bg-slate-950 text-blue-400 shadow-xs' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                Blueprint
-              </button>
-            </div>
+          {/* Fit all markers button */}
+          {mapEngine !== 'radar' && (
+            <button
+              type="button"
+              onClick={handleFitAllMarkers}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 transition cursor-pointer flex items-center gap-1.5 text-xs font-semibold"
+              title="Perlihatkan Semua Pekerja di Peta"
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
+              <span>Lihat Semua Pekerja</span>
+            </button>
           )}
 
-          {/* Reset Zoom / Center Button */}
+          {/* Reset Center */}
           <button
             type="button"
-            onClick={handleResetView}
+            onClick={handleCenterOffice}
             className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition cursor-pointer flex items-center gap-1 text-xs font-semibold"
             title="Pusatkan Kembali ke Kantor"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Pusatkan</span>
+            <span className="hidden sm:inline">Kantor</span>
           </button>
         </div>
       </div>
 
-      {/* Stats Strip */}
+      {/* Stats Summary Strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3 text-xs">
         <button
           type="button"
@@ -342,9 +602,9 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
               : 'bg-white hover:bg-slate-50 border-slate-200'
           }`}
         >
-          <div className="text-slate-500 font-semibold mb-0.5">Total Presensi di Peta</div>
+          <div className="text-slate-500 font-semibold mb-0.5">Total Titik di Peta</div>
           <div className="text-xl font-black text-slate-900">{totalCheckedIn}</div>
-          <div className="text-[10px] text-slate-400 mt-0.5">Hari Ini</div>
+          <div className="text-[10px] text-slate-400 mt-0.5">Pekerja Aktif Hari Ini</div>
         </button>
 
         <button
@@ -358,7 +618,7 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
         >
           <div className="text-emerald-700 font-semibold mb-0.5 flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span>Di Dalam Kantor</span>
+            <span>Dalam Radius Kantor</span>
           </div>
           <div className="text-xl font-black text-emerald-700">{totalInRadius}</div>
           <div className="text-[10px] text-emerald-600 mt-0.5">&le; {officeRadius}m Radius</div>
@@ -401,10 +661,10 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
 
       {/* Main Map & Interactive Sidebar Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Map Canvas Column (Takes 2 Cols on large screen) */}
+        {/* Map Canvas Column */}
         <div className="lg:col-span-2 bg-slate-950 rounded-2xl border border-slate-800 shadow-xl overflow-hidden relative flex flex-col">
           {/* Map Floating HUD Overlay */}
-          <div className="absolute top-3 left-3 z-20 flex flex-col gap-2">
+          <div className="absolute top-3 left-3 z-30 flex flex-col gap-2 pointer-events-auto">
             {/* Geofence Info Badge */}
             <div className="bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-xl border border-slate-700/80 text-white shadow-lg text-xs space-y-0.5">
               <div className="flex items-center gap-1.5 font-bold text-emerald-400 text-[11px]">
@@ -419,22 +679,22 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
             {/* Legend overlay */}
             <div className="bg-slate-900/90 backdrop-blur-md p-2.5 rounded-xl border border-slate-700/80 text-[10px] text-slate-300 shadow-lg space-y-1.5">
               <div className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-950 shrink-0" />
-                <span>Check-In di Dalam Radius</span>
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-950 shrink-0 animate-pulse" />
+                <span>Pekerja di Dalam Radius</span>
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-full bg-amber-500 ring-2 ring-amber-950 shrink-0" />
-                <span>Check-In di Luar Radius (WFA)</span>
+                <span>Pekerja di Luar Radius (WFA)</span>
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-full bg-blue-500 ring-2 ring-blue-950 shrink-0" />
-                <span>Sudah Check-Out</span>
+                <span>Pekerja Sudah Check-Out</span>
               </div>
             </div>
           </div>
 
-          {/* Floating Map Zoom Buttons */}
-          <div className="absolute bottom-4 right-4 z-20 flex flex-col gap-1.5 bg-slate-900/90 backdrop-blur-md p-1.5 rounded-2xl border border-slate-700 shadow-2xl">
+          {/* Floating Map Zoom & Action Buttons */}
+          <div className="absolute bottom-4 right-4 z-30 flex flex-col gap-1.5 bg-slate-900/90 backdrop-blur-md p-1.5 rounded-2xl border border-slate-700 shadow-2xl pointer-events-auto">
             <button
               type="button"
               onClick={handleZoomIn}
@@ -451,38 +711,38 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
             >
               <ZoomOut className="w-4 h-4" />
             </button>
+            {mapEngine !== 'radar' && (
+              <button
+                type="button"
+                onClick={handleFitAllMarkers}
+                className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 transition cursor-pointer"
+                title="Pusatkan Semua Titik Pekerja"
+              >
+                <Maximize2 className="w-4 h-4" />
+              </button>
+            )}
             <button
               type="button"
-              onClick={handleResetView}
+              onClick={handleCenterOffice}
               className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white transition cursor-pointer"
-              title="Kembalikan Sudut Pandang"
+              title="Pusatkan ke Kantor"
             >
               <RotateCcw className="w-4 h-4" />
             </button>
           </div>
 
-          {/* Scale indicator */}
-          <div className="absolute bottom-4 left-4 z-20 bg-slate-900/80 backdrop-blur-xs px-2.5 py-1 rounded-lg border border-slate-700/80 text-[10px] font-mono text-slate-400">
-            {mapEngine === 'radar' ? (
-              <>Skala: {(100 / zoomLevel).toFixed(0)}m per grid • Zoom: {zoomLevel.toFixed(1)}x</>
-            ) : (
-              <>Google Maps Zoom: {googleZoom}x • {mapEngine === 'google-satellite' ? 'Satelit Hybrid' : 'Peta Google'}</>
-            )}
-          </div>
-
-          {/* Map View Canvas: Google Maps vs Radar Geofence SVG */}
+          {/* Map View Canvas: Leaflet Google Maps with Live Dots vs Radar Geofence SVG */}
           {mapEngine !== 'radar' ? (
-            <div className="w-full h-[450px] sm:h-[520px] relative bg-slate-950 overflow-hidden">
-              <iframe
-                title="Google Maps Presensi GPS"
-                src={`https://maps.google.com/maps?q=${activeLat},${activeLng}&z=${googleZoom}&output=embed${mapEngine === 'google-satellite' ? '&t=k' : ''}`}
-                className="w-full h-full border-0"
-                loading="lazy"
-                allowFullScreen
+            <div className="w-full h-[480px] sm:h-[550px] relative bg-slate-950 overflow-hidden">
+              {/* Leaflet DOM container */}
+              <div
+                ref={mapContainerRef}
+                className="w-full h-full z-10"
+                style={{ background: '#090d16' }}
               />
 
-              {/* Floating Google Maps Active Target Badge */}
-              <div className="absolute top-3 right-3 z-20 flex flex-col gap-1.5 items-end max-w-[80%] sm:max-w-md">
+              {/* Floating Active Target Badge */}
+              <div className="absolute top-3 right-3 z-30 flex flex-col gap-1.5 items-end max-w-[80%] sm:max-w-md pointer-events-auto">
                 <div className="bg-slate-900/95 backdrop-blur-md px-3.5 py-2 rounded-xl border border-slate-700 text-white shadow-xl text-xs space-y-1">
                   <div className="flex items-center gap-1.5">
                     <MapPin className="w-3.5 h-3.5 text-rose-500 animate-bounce shrink-0" />
@@ -498,7 +758,7 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
                   <div className="text-[10px] font-mono text-slate-400 flex items-center justify-between gap-3">
                     <span>{activeLat.toFixed(5)}, {activeLng.toFixed(5)}</span>
                     <a
-                      href={`https://www.google.com/maps?q=${activeLat},${activeLng}`}
+                      href={`https://www.google.com/maps/search/?api=1&query=${activeLat},${activeLng}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-indigo-400 hover:text-indigo-300 underline flex items-center gap-1 font-sans"
@@ -511,269 +771,199 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
               </div>
             </div>
           ) : (
-            <div className="w-full h-[450px] sm:h-[520px] relative select-none cursor-grab active:cursor-grabbing">
-            <svg
-              ref={svgRef}
-              viewBox={`0 0 ${viewBoxWidth} ${viewBoxHeight}`}
-              className="w-full h-full"
-              onMouseDown={handleMouseDown}
-              onMouseMove={handleMouseMove}
-              onMouseUp={handleMouseUp}
-              onMouseLeave={handleMouseUp}
-            >
-              <defs>
-                {/* Radial gradient for Radar Geofence */}
-                <radialGradient id="geofenceGlow" cx="50%" cy="50%" r="50%">
-                  <stop offset="0%" stopColor="#10b981" stopOpacity="0.25" />
-                  <stop offset="70%" stopColor="#10b981" stopOpacity="0.12" />
-                  <stop offset="100%" stopColor="#10b981" stopOpacity="0.0" />
-                </radialGradient>
-
-                {/* Grid pattern */}
-                <pattern
-                  id="mapGrid"
-                  width={60 * zoomLevel}
-                  height={60 * zoomLevel}
-                  patternUnits="userSpaceOnUse"
-                  patternTransform={`translate(${panOffset.x % (60 * zoomLevel)}, ${panOffset.y % (60 * zoomLevel)})`}
-                >
-                  <path
-                    d={`M ${60 * zoomLevel} 0 L 0 0 0 ${60 * zoomLevel}`}
-                    fill="none"
-                    stroke={
-                      mapTheme === 'blueprint'
-                        ? 'rgba(59, 130, 246, 0.12)'
-                        : mapTheme === 'satellite'
-                        ? 'rgba(20, 184, 166, 0.10)'
-                        : 'rgba(255, 255, 255, 0.05)'
-                    }
-                    strokeWidth="1"
-                  />
-                </pattern>
-              </defs>
-
-              {/* Map Background */}
-              <rect
-                width={viewBoxWidth}
-                height={viewBoxHeight}
-                fill={
-                  mapTheme === 'blueprint'
-                    ? '#0c192e'
-                    : mapTheme === 'satellite'
-                    ? '#051919'
-                    : '#090d16'
-                }
-              />
-
-              {/* Grid Lines */}
-              <rect width={viewBoxWidth} height={viewBoxHeight} fill="url(#mapGrid)" />
-
-              {/* Concentric Distance Rings from Office */}
-              {[50, 100, 200, 350, 500].map((radiusM) => {
-                const rPixels = metersToSvg(radiusM);
-                const isGeofence = radiusM === officeRadius;
-                return (
-                  <g key={radiusM}>
-                    <circle
-                      cx={centerX + panOffset.x}
-                      cy={centerY + panOffset.y}
-                      r={rPixels}
-                      fill={isGeofence ? 'url(#geofenceGlow)' : 'none'}
-                      stroke={
-                        isGeofence
-                          ? '#10b981'
-                          : mapTheme === 'blueprint'
-                          ? 'rgba(59, 130, 246, 0.2)'
-                          : 'rgba(148, 163, 184, 0.15)'
-                      }
-                      strokeWidth={isGeofence ? '2.5' : '1'}
-                      strokeDasharray={isGeofence ? 'none' : '4 4'}
-                    />
-                    {/* Radius Distance Label */}
-                    <text
-                      x={centerX + panOffset.x + rPixels + 4}
-                      y={centerY + panOffset.y - 4}
-                      fill={isGeofence ? '#10b981' : '#64748b'}
-                      fontSize="9"
-                      fontFamily="monospace"
-                    >
-                      {radiusM}m
-                    </text>
-                  </g>
-                );
-              })}
-
-              {/* Animated Radar Sweep Ring around Geofence */}
-              <circle
-                cx={centerX + panOffset.x}
-                cy={centerY + panOffset.y}
-                r={metersToSvg(officeRadius)}
-                fill="none"
-                stroke="#10b981"
-                strokeWidth="1"
-                opacity="0.6"
-                className="animate-ping origin-center"
-              />
-
-              {/* Center Office Building Marker */}
-              <g
-                transform={`translate(${centerX + panOffset.x}, ${centerY + panOffset.y})`}
-                className="cursor-pointer"
-                onClick={handleResetView}
+            <div className="w-full h-[480px] sm:h-[550px] relative select-none cursor-grab active:cursor-grabbing">
+              <svg
+                ref={svgRef}
+                viewBox={`0 0 ${viewBoxWidth} ${viewBoxHeight}`}
+                className="w-full h-full"
+                onMouseDown={handleMouseDown}
+                onMouseMove={handleMouseMove}
+                onMouseUp={handleMouseUp}
+                onMouseLeave={handleMouseUp}
               >
-                {/* Office base pulse */}
-                <circle r="22" fill="#10b981" opacity="0.2" className="animate-pulse" />
-                <circle r="15" fill="#0f172a" stroke="#10b981" strokeWidth="2.5" />
-                <foreignObject x="-9" y="-9" width="18" height="18">
-                  <div className="w-full h-full flex items-center justify-center text-emerald-400">
-                    <Building2 className="w-4 h-4" />
-                  </div>
-                </foreignObject>
-                <text
-                  x="0"
-                  y="26"
-                  textAnchor="middle"
-                  fill="#ffffff"
-                  fontSize="10"
-                  fontWeight="bold"
-                  className="drop-shadow"
-                >
-                  {config.companyName}
-                </text>
-                <text
-                  x="0"
-                  y="36"
-                  textAnchor="middle"
-                  fill="#10b981"
-                  fontSize="8"
-                  fontWeight="600"
-                >
-                  (Pusat Geofence)
-                </text>
-              </g>
-
-              {/* Employee Pins */}
-              {filteredMapData.map((item) => {
-                const isSelected = selectedEmployeeId === item.employee.id;
-
-                // Position coords
-                const targetLat =
-                  selectedRecordType === 'checkout' && item.checkOutLat
-                    ? item.checkOutLat
-                    : item.checkInLat || officeLat;
-                const targetLng =
-                  selectedRecordType === 'checkout' && item.checkOutLng
-                    ? item.checkOutLng
-                    : item.checkInLng || officeLng;
-
-                const pos = coordsToSvg(targetLat, targetLng);
-
-                // Pin color
-                const pinColor =
-                  item.statusType === 'checked_out'
-                    ? '#3b82f6'
-                    : item.statusType === 'out_radius'
-                    ? '#f59e0b'
-                    : '#10b981';
-
-                return (
-                  <g
-                    key={item.employee.id}
-                    transform={`translate(${pos.x}, ${pos.y})`}
-                    className="cursor-pointer transition-transform duration-150 hover:scale-110"
-                    onClick={() => {
-                      setSelectedEmployeeId(item.employee.id);
-                    }}
+                <defs>
+                  <radialGradient id="geofenceGlow" cx="50%" cy="50%" r="50%">
+                    <stop offset="0%" stopColor="#10b981" stopOpacity="0.25" />
+                    <stop offset="70%" stopColor="#10b981" stopOpacity="0.12" />
+                    <stop offset="100%" stopColor="#10b981" stopOpacity="0.0" />
+                  </radialGradient>
+                  <pattern
+                    id="mapGrid"
+                    width={60 * zoomLevel}
+                    height={60 * zoomLevel}
+                    patternUnits="userSpaceOnUse"
+                    patternTransform={`translate(${panOffset.x % (60 * zoomLevel)}, ${panOffset.y % (60 * zoomLevel)})`}
                   >
-                    {/* Distance line from office if selected */}
-                    {isSelected && (
-                      <line
-                        x1={-(pos.x - (centerX + panOffset.x))}
-                        y1={-(pos.y - (centerY + panOffset.y))}
-                        x2="0"
-                        y2="0"
-                        stroke={pinColor}
-                        strokeWidth="1.5"
-                        strokeDasharray="3 3"
-                        opacity="0.8"
-                      />
-                    )}
+                    <path
+                      d={`M ${60 * zoomLevel} 0 L 0 0 0 ${60 * zoomLevel}`}
+                      fill="none"
+                      stroke="rgba(255, 255, 255, 0.06)"
+                      strokeWidth="1"
+                    />
+                  </pattern>
+                </defs>
 
-                    {/* Selected pulse halo */}
-                    {isSelected && (
+                <rect width={viewBoxWidth} height={viewBoxHeight} fill="#090d16" />
+                <rect width={viewBoxWidth} height={viewBoxHeight} fill="url(#mapGrid)" />
+
+                {/* Concentric rings */}
+                {[50, 100, 200, 350, 500].map((radiusM) => {
+                  const rPixels = metersToSvg(radiusM);
+                  const isGeofence = radiusM === officeRadius;
+                  return (
+                    <g key={radiusM}>
                       <circle
-                        r="24"
-                        fill="none"
-                        stroke={pinColor}
-                        strokeWidth="2"
-                        className="animate-ping"
+                        cx={centerX + panOffset.x}
+                        cy={centerY + panOffset.y}
+                        r={rPixels}
+                        fill={isGeofence ? 'url(#geofenceGlow)' : 'none'}
+                        stroke={isGeofence ? '#10b981' : 'rgba(148, 163, 184, 0.15)'}
+                        strokeWidth={isGeofence ? '2.5' : '1'}
+                        strokeDasharray={isGeofence ? 'none' : '4 4'}
                       />
-                    )}
+                      <text
+                        x={centerX + panOffset.x + rPixels + 4}
+                        y={centerY + panOffset.y - 4}
+                        fill={isGeofence ? '#10b981' : '#64748b'}
+                        fontSize="9"
+                        fontFamily="monospace"
+                      >
+                        {radiusM}m
+                      </text>
+                    </g>
+                  );
+                })}
 
-                    {/* Pin Outer Ring */}
-                    <circle
-                      r={isSelected ? '16' : '13'}
-                      fill="#0f172a"
-                      stroke={pinColor}
-                      strokeWidth={isSelected ? '3' : '2'}
-                      className="shadow-xl"
-                    />
+                {/* Animated radar ring */}
+                <circle
+                  cx={centerX + panOffset.x}
+                  cy={centerY + panOffset.y}
+                  r={metersToSvg(officeRadius)}
+                  fill="none"
+                  stroke="#10b981"
+                  strokeWidth="1"
+                  opacity="0.6"
+                  className="animate-ping origin-center"
+                />
 
-                    {/* Employee Initials */}
-                    <text
-                      x="0"
-                      y="4"
-                      textAnchor="middle"
-                      fill="#ffffff"
-                      fontSize={isSelected ? '9' : '8'}
-                      fontWeight="bold"
+                {/* Center Office Building Marker */}
+                <g
+                  transform={`translate(${centerX + panOffset.x}, ${centerY + panOffset.y})`}
+                  className="cursor-pointer"
+                  onClick={handleCenterOffice}
+                >
+                  <circle r="22" fill="#10b981" opacity="0.2" className="animate-pulse" />
+                  <circle r="15" fill="#0f172a" stroke="#10b981" strokeWidth="2.5" />
+                  <foreignObject x="-9" y="-9" width="18" height="18">
+                    <div className="w-full h-full flex items-center justify-center text-emerald-400">
+                      <Building2 className="w-4 h-4" />
+                    </div>
+                  </foreignObject>
+                  <text
+                    x="0"
+                    y="26"
+                    textAnchor="middle"
+                    fill="#ffffff"
+                    fontSize="10"
+                    fontWeight="bold"
+                    className="drop-shadow"
+                  >
+                    {config.companyName}
+                  </text>
+                </g>
+
+                {/* Employee Pins on SVG */}
+                {filteredMapData.map((item) => {
+                  const isSelected = selectedEmployeeId === item.employee.id;
+                  const targetLat =
+                    selectedRecordType === 'checkout' && item.checkOutLat
+                      ? item.checkOutLat
+                      : item.checkInLat || officeLat;
+                  const targetLng =
+                    selectedRecordType === 'checkout' && item.checkOutLng
+                      ? item.checkOutLng
+                      : item.checkInLng || officeLng;
+
+                  const pos = coordsToSvg(targetLat, targetLng);
+                  const pinColor =
+                    item.statusType === 'checked_out'
+                      ? '#3b82f6'
+                      : item.statusType === 'out_radius'
+                      ? '#f59e0b'
+                      : '#10b981';
+
+                  return (
+                    <g
+                      key={item.employee.id}
+                      transform={`translate(${pos.x}, ${pos.y})`}
+                      className="cursor-pointer transition-transform duration-150 hover:scale-110"
+                      onClick={() => handleFocusEmployee(item.employee.id)}
                     >
-                      {item.employee.name
-                        .split(' ')
-                        .map((n) => n[0])
-                        .slice(0, 2)
-                        .join('')}
-                    </text>
-
-                    {/* Small Status Indicator Dot */}
-                    <circle
-                      cx="9"
-                      cy="-9"
-                      r="4"
-                      fill={pinColor}
-                      stroke="#0f172a"
-                      strokeWidth="1.5"
-                    />
-
-                    {/* Employee Label Tag */}
-                    <g transform="translate(0, 22)">
-                      <rect
-                        x="-45"
-                        y="-7"
-                        width="90"
-                        height="16"
-                        rx="8"
-                        fill="#090d16"
-                        stroke={isSelected ? pinColor : 'rgba(255,255,255,0.15)'}
-                        strokeWidth={isSelected ? '1.5' : '1'}
-                        opacity="0.95"
+                      {isSelected && (
+                        <circle
+                          r="24"
+                          fill="none"
+                          stroke={pinColor}
+                          strokeWidth="2"
+                          className="animate-ping"
+                        />
+                      )}
+                      <circle
+                        r={isSelected ? '16' : '13'}
+                        fill="#0f172a"
+                        stroke={pinColor}
+                        strokeWidth={isSelected ? '3' : '2'}
                       />
                       <text
                         x="0"
                         y="4"
                         textAnchor="middle"
                         fill="#ffffff"
-                        fontSize="8"
+                        fontSize={isSelected ? '9' : '8'}
                         fontWeight="bold"
                       >
-                        {item.employee.name.split(' ')[0]} ({item.distanceMeters}m)
+                        {item.employee.name
+                          .split(' ')
+                          .map((n) => n[0])
+                          .slice(0, 2)
+                          .join('')}
                       </text>
+                      <circle
+                        cx="9"
+                        cy="-9"
+                        r="4"
+                        fill={pinColor}
+                        stroke="#0f172a"
+                        strokeWidth="1.5"
+                      />
+                      <g transform="translate(0, 22)">
+                        <rect
+                          x="-45"
+                          y="-7"
+                          width="90"
+                          height="16"
+                          rx="8"
+                          fill="#090d16"
+                          stroke={isSelected ? pinColor : 'rgba(255,255,255,0.15)'}
+                          strokeWidth={isSelected ? '1.5' : '1'}
+                          opacity="0.95"
+                        />
+                        <text
+                          x="0"
+                          y="4"
+                          textAnchor="middle"
+                          fill="#ffffff"
+                          fontSize="8"
+                          fontWeight="bold"
+                        >
+                          {item.employee.name.split(' ')[0]} ({item.distanceMeters}m)
+                        </text>
+                      </g>
                     </g>
-                  </g>
-                );
-              })}
-            </svg>
-          </div>
+                  );
+                })}
+              </svg>
+            </div>
           )}
         </div>
 
@@ -784,7 +974,7 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
             <div className="bg-white rounded-2xl border border-slate-200 shadow-md p-4 space-y-3 animate-in fade-in duration-150">
               <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-3">
                 <div className="flex items-center gap-2.5">
-                  <div className="w-11 h-11 rounded-2xl bg-slate-900 text-white font-bold text-sm flex items-center justify-center shrink-0 shadow-sm">
+                  <div className="w-11 h-11 rounded-2xl bg-slate-900 text-white font-bold text-sm flex items-center justify-center shrink-0 shadow-sm border-2 border-emerald-500">
                     {selectedItem.employee.name
                       .split(' ')
                       .map((n) => n[0])
@@ -794,15 +984,16 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
                   <div>
                     <h3 className="font-extrabold text-slate-900 text-sm">{selectedItem.employee.name}</h3>
                     <div className="text-xs text-slate-500">
-                      {selectedItem.employee.department} • {selectedItem.employee.position}
+                      ID: <strong className="text-slate-800">{selectedItem.employee.id}</strong> • {selectedItem.employee.department}
                     </div>
+                    <div className="text-[11px] text-slate-400">{selectedItem.employee.position}</div>
                   </div>
                 </div>
 
                 <button
                   type="button"
                   onClick={() => setSelectedEmployeeId(null)}
-                  className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 text-xs font-bold"
+                  className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 text-xs font-bold cursor-pointer"
                 >
                   ✕
                 </button>
@@ -830,10 +1021,10 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
                   />
                   <span>
                     {selectedItem.statusType === 'checked_out'
-                      ? 'Sudah Check-Out'
+                      ? 'Sudah Pulang'
                       : selectedItem.statusType === 'out_radius'
-                      ? 'Check-In Luar Radius (WFA)'
-                      : 'Check-In Valid di Kantor'}
+                      ? 'Luar Radius / WFA'
+                      : 'Dalam Radius Kantor'}
                   </span>
                 </span>
 
@@ -884,7 +1075,7 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
                     rel="noreferrer"
                     className="w-full py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition shadow-sm"
                   >
-                    <span>Buka Titik di Google Maps</span>
+                    <span>Buka Titik di Google Maps Asli</span>
                     <ArrowUpRight className="w-3.5 h-3.5 text-emerald-400" />
                   </a>
                 )}
@@ -905,9 +1096,9 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
               <div className="w-10 h-10 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto">
                 <MapPin className="w-5 h-5" />
               </div>
-              <div className="text-xs font-bold text-slate-800">Pilih Pin di Peta</div>
+              <div className="text-xs font-bold text-slate-800">Pilih Titik Pekerja di Peta</div>
               <p className="text-[11px] text-slate-500">
-                Klik pin karyawan di atas kanvas peta atau pilih dari daftar di bawah untuk melihat rincian koordinat GPS dan rute.
+                Klik titik poin pekerja di atas peta Google atau pilih dari daftar karyawan di bawah untuk melihat rincian koordinat presisi dan rute.
               </p>
             </div>
           )}
@@ -917,7 +1108,7 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
             <div className="flex items-center justify-between gap-2 text-xs font-bold text-slate-900">
               <span className="flex items-center gap-1.5">
                 <Users className="w-4 h-4 text-emerald-600" />
-                <span>Daftar Karyawan di Peta ({filteredMapData.length})</span>
+                <span>Daftar Titik Pekerja Live ({filteredMapData.length})</span>
               </span>
             </div>
 
@@ -953,9 +1144,7 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
                     <button
                       key={item.employee.id}
                       type="button"
-                      onClick={() => {
-                        setSelectedEmployeeId(item.employee.id);
-                      }}
+                      onClick={() => handleFocusEmployee(item.employee.id)}
                       className={`w-full p-2 rounded-xl text-left text-xs transition cursor-pointer flex items-center justify-between gap-2 border ${
                         isSelected
                           ? 'bg-slate-900 text-white border-slate-800 shadow-sm'
@@ -963,7 +1152,7 @@ export const AttendanceMapsDashboard: React.FC<AttendanceMapsDashboardProps> = (
                       }`}
                     >
                       <div className="flex items-center gap-2 min-w-0">
-                        <span className={`w-2 h-2 rounded-full ${pinColor} shrink-0`} />
+                        <span className={`w-2 h-2 rounded-full ${pinColor} shrink-0 animate-pulse`} />
                         <div className="truncate">
                           <div className="font-bold truncate">{item.employee.name}</div>
                           <div

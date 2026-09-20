@@ -33,7 +33,11 @@ import {
   KeyRound,
   Lock,
   Radio,
-  Compass
+  Compass,
+  Plane,
+  Building2,
+  Upload,
+  Calendar
 } from 'lucide-react';
 import { 
   AttendanceRecord, 
@@ -42,20 +46,25 @@ import {
   PayrollSummary, 
   Shift, 
   OvertimeMultiplierRule,
-  WorkReport
+  WorkReport,
+  TemporaryLocationAssignment
 } from '../types';
 import { calculateDistanceMeters, formatDistance, getCurrentCoordinates } from '../utils/geo';
 import { computeEmployeePayroll, formatIDR, getPayrollCycleInfo } from '../utils/payroll';
-import { exportPayrollReportPDF } from '../utils/exportPdf';
+import { exportPayrollReportPDF, exportSingleEmployeeSlipPDF, PAYSLIP_TEMPLATES, PayslipTemplateId } from '../utils/exportPdf';
 import { exportPayrollAndAttendanceExcel } from '../utils/exportExcel';
 import { AdminWorkReportSection } from './AdminWorkReportSection';
 import { AttendanceCharts } from './AttendanceCharts';
 import { LiveEmployeeDashboard } from './LiveEmployeeDashboard';
 import { AttendanceMapsDashboard } from './AttendanceMapsDashboard';
+import { AttendanceApprovalSection } from './AttendanceApprovalSection';
 import { EmployeeModal } from './EmployeeModal';
 import { DeleteEmployeeModal } from './DeleteEmployeeModal';
 import { ShiftManagementModal } from './ShiftManagementModal';
 import { ChangeAdminPasswordModal } from './ChangeAdminPasswordModal';
+import { TemporaryDutyModal } from './TemporaryDutyModal';
+import { HolidayOvertimeManager } from './HolidayOvertimeManager';
+import { CompanyProfileSettings } from './CompanyProfileSettings';
 
 interface AdminDashboardProps {
   config: CompanyConfig;
@@ -68,10 +77,15 @@ interface AdminDashboardProps {
   onUpdateShifts?: (shifts: Shift[]) => void;
   workReports?: WorkReport[];
   onUpdateWorkReports?: (reports: WorkReport[]) => void;
+  assignments?: TemporaryLocationAssignment[];
+  onSaveAssignment?: (assignment: TemporaryLocationAssignment) => void;
+  onUpdateAssignmentStatus?: (id: string, status: 'active' | 'completed' | 'cancelled') => void;
+  onDeleteAssignment?: (id: string) => void;
   onManualSyncSheets: () => void;
   isSyncingSheets: boolean;
   onTriggerEmailAlert: (to: string, subject: string, event: string, desc: string) => void;
   onSendPushNotification: (title: string, message: string, type: 'shift' | 'attendance' | 'payroll' | 'info') => void;
+  initialTab?: 'live-employees' | 'attendance-maps' | 'attendance' | 'attendance-charts' | 'payroll' | 'holiday-overtime' | 'rules' | 'company-profile' | 'sheets' | 'reports' | 'employees' | 'work-reports';
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
@@ -85,12 +99,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onUpdateShifts,
   workReports = [],
   onUpdateWorkReports,
+  assignments = [],
+  onSaveAssignment,
+  onUpdateAssignmentStatus,
+  onDeleteAssignment,
   onManualSyncSheets,
   isSyncingSheets,
   onTriggerEmailAlert,
   onSendPushNotification,
+  initialTab,
 }) => {
-  const [activeTab, setActiveTab] = useState<'live-employees' | 'attendance-maps' | 'attendance' | 'attendance-charts' | 'payroll' | 'rules' | 'sheets' | 'reports' | 'employees' | 'work-reports'>('live-employees');
+  const [activeTab, setActiveTab] = useState<'live-employees' | 'attendance-maps' | 'attendance' | 'attendance-charts' | 'payroll' | 'holiday-overtime' | 'rules' | 'company-profile' | 'sheets' | 'reports' | 'employees' | 'work-reports'>(initialTab || 'live-employees');
   const [targetMapEmployeeId, setTargetMapEmployeeId] = useState<string | undefined>(undefined);
   
   // Department filter
@@ -108,11 +127,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, [config]);
 
   // Employee Add / Edit / Delete Modal states
+  const [adminSlipTemplate, setAdminSlipTemplate] = useState<PayslipTemplateId>('corporate-emerald');
   const [isAddEmployeeModalOpen, setIsAddEmployeeModalOpen] = useState(false);
   const [employeeToEdit, setEmployeeToEdit] = useState<Employee | null>(null);
   const [employeeToDelete, setEmployeeToDelete] = useState<Employee | null>(null);
   const [isShiftModalOpen, setIsShiftModalOpen] = useState(false);
   const [isChangePasswordModalOpen, setIsChangePasswordModalOpen] = useState(false);
+  const [isDutyModalOpen, setIsDutyModalOpen] = useState(false);
+
+  const activeDutyCount = assignments.filter((a) => a.status === 'active').length;
 
   const handleChangeAdminPassword = (newPassword: string, newUsername?: string) => {
     const updated = {
@@ -226,19 +249,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   // Handle Employee Add / Update with ID correction support
+  // Handle Save Employee (both Add & Edit)
   const handleSaveEmployee = (savedEmp: Employee, originalId?: string) => {
-    const targetId = originalId || savedEmp.id;
-    const existingIndex = employees.findIndex((e) => e.id === targetId);
+    const targetOriginal = (originalId || savedEmp.id).trim().toUpperCase();
+    const existingIndex = employees.findIndex(
+      (e) => e.id.trim().toUpperCase() === targetOriginal || e.id.trim().toUpperCase() === savedEmp.id.trim().toUpperCase()
+    );
     let updatedList: Employee[];
     const shiftInfo = shifts.find((s) => s.id === savedEmp.currentShiftId)?.name || 'Shift Standar';
 
     if (existingIndex >= 0) {
-      updatedList = employees.map((e) => (e.id === targetId ? savedEmp : e));
+      const oldEmp = employees[existingIndex];
+      const oldId = oldEmp.id;
+      updatedList = employees.map((e, idx) => (idx === existingIndex ? savedEmp : e));
 
       // Cascade update to attendance records if ID or name changed
-      if (originalId && originalId !== savedEmp.id) {
+      if (oldId.trim().toUpperCase() !== savedEmp.id.trim().toUpperCase() || oldEmp.name !== savedEmp.name) {
         const updatedAttendances = attendanceRecords.map((r) =>
-          r.employeeId === originalId
+          r.employeeId.trim().toUpperCase() === oldId.trim().toUpperCase()
             ? {
                 ...r,
                 employeeId: savedEmp.id,
@@ -252,7 +280,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         // Cascade update to work reports if present
         if (onUpdateWorkReports && workReports) {
           const updatedReports = workReports.map((w) =>
-            w.employeeId === originalId
+            w.employeeId.trim().toUpperCase() === oldId.trim().toUpperCase()
               ? {
                   ...w,
                   employeeId: savedEmp.id,
@@ -267,7 +295,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
         onSendPushNotification(
           'ID Karyawan Diperbarui',
-          `ID Karyawan ${savedEmp.name} berhasil diperbarui dari ${originalId} menjadi ${savedEmp.id}. Riwayat presensi & laporan telah disinkronkan.`,
+          `ID Karyawan ${savedEmp.name} berhasil diperbarui dari ${oldId} menjadi ${savedEmp.id}. Riwayat presensi & laporan telah disinkronkan.`,
           'info'
         );
       }
@@ -304,16 +332,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   // Handle Employee Deletion
-  const handleDeleteEmployeeConfirm = (employeeId: string) => {
-    const emp = employees.find((e) => e.id === employeeId);
-    const updated = employees.filter((e) => e.id !== employeeId);
+  const handleDeleteEmployeeConfirm = (employeeId?: string) => {
+    const targetId = (employeeId || employeeToDelete?.id || '').trim().toUpperCase();
+    if (!targetId) return;
+
+    const emp = employees.find((e) => e.id.trim().toUpperCase() === targetId);
+    const updated = employees.filter((e) => e.id.trim().toUpperCase() !== targetId);
     onUpdateEmployees(updated);
     setEmployeeToDelete(null);
 
     if (emp) {
       onSendPushNotification(
         'Karyawan Dihapus',
-        `Karyawan ${emp.name} (${emp.id}) telah dinonaktifkan dan dihapus dari sistem.`,
+        `Karyawan ${emp.name} (${emp.id}) telah berhasil dihapus dari sistem.`,
         'info'
       );
     }
@@ -336,6 +367,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const cycleInfo = getPayrollCycleInfo(config);
+
+  // Helper for single employee PDF salary slip download
+  const handleDownloadSingleSlip = (summary: PayrollSummary) => {
+    const emp = employees.find((e) => e.id.trim().toUpperCase() === summary.employeeId.trim().toUpperCase()) || ({
+      id: summary.employeeId,
+      name: summary.employeeName,
+      department: summary.department,
+      position: summary.position,
+      baseSalary: summary.baseSalary,
+      allowance: summary.allowance,
+      dailyTransport: summary.transportAllowance / (summary.attendanceDays || 1),
+      currentShiftId: 'SHIFT-REG',
+      email: '',
+      bankName: 'BCA',
+      bankAccount: '-',
+      salaryType: summary.salaryType,
+      dailyRate: summary.dailyRate,
+    } as Employee);
+
+    exportSingleEmployeeSlipPDF(emp, summary, attendanceRecords, config, adminSlipTemplate, cycleInfo.cyclePeriodText);
+  };
 
   return (
     <div className="space-y-6 pb-12">
@@ -390,6 +442,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           <button
             type="button"
+            onClick={() => setIsDutyModalOpen(true)}
+            className="flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200 transition cursor-pointer shadow-sm"
+            title="Kelola Penugasan Khusus / Luar Kota & Titik Absensi Sementara"
+          >
+            <MapPin className="w-3.5 h-3.5 text-purple-600" />
+            <span>Tugas Luar Kota</span>
+            {activeDutyCount > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-black bg-purple-600 text-white">
+                {activeDutyCount}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
             onClick={() => exportPayrollReportPDF(filteredSummaries, config, selectedDepartment)}
             className="flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-slate-900 text-white hover:bg-slate-800 shadow-sm transition cursor-pointer"
           >
@@ -428,11 +495,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               {activeTab === 'live-employees' && 'Live Karyawan'}
               {activeTab === 'attendance-maps' && 'Peta Presensi GPS'}
               {activeTab === 'payroll' && 'Gaji & Lembur'}
+              {activeTab === 'holiday-overtime' && 'Lembur Minggu & Libur'}
               {activeTab === 'attendance' && 'Log Presensi GPS'}
               {activeTab === 'attendance-charts' && 'Grafik Kehadiran'}
               {activeTab === 'work-reports' && 'Laporan Kerja'}
               {activeTab === 'employees' && 'Karyawan & Shift'}
               {activeTab === 'rules' && 'Kebijakan HR'}
+              {activeTab === 'company-profile' && 'Profil & Nama App'}
               {activeTab === 'reports' && 'Ekspor Laporan'}
               {activeTab === 'sheets' && 'Spreadsheet DB'}
             </span>
@@ -447,11 +516,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <option value="live-employees">🔴 Live Monitoring Karyawan (Real-Time)</option>
               <option value="attendance-maps">🗺️ Peta Presensi GPS (Checkin & Checkout)</option>
               <option value="payroll">💰 Gaji & Lembur</option>
+              <option value="holiday-overtime">📅 Lembur Minggu, Hari Tertentu & Tanggal Merah</option>
               <option value="attendance">📍 Log Presensi GPS</option>
               <option value="attendance-charts">📊 Grafik Kehadiran Pekerja</option>
               <option value="work-reports">📝 Laporan Kerja & Rekomendasi</option>
               <option value="employees">👥 Karyawan & Shift Kerja</option>
               <option value="rules">⚙️ Kebijakan Lembur, GPS & Tutup Buku</option>
+              <option value="company-profile">🏢 Profil Perusahaan & Nama Aplikasi</option>
               <option value="reports">📑 Ekspor Laporan Departemen</option>
               <option value="sheets">🔗 Integrasi Spreadsheet (DB)</option>
             </select>
@@ -488,6 +559,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               }`}
             >
               Gaji & Lembur
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('holiday-overtime')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition shrink-0 flex items-center gap-1.5 ${
+                activeTab === 'holiday-overtime' ? 'bg-rose-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600'
+              }`}
+            >
+              <Calendar className="w-3 h-3 text-rose-500" />
+              <span>Lembur Libur</span>
             </button>
             <button
               type="button"
@@ -533,6 +614,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               }`}
             >
               Kebijakan
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('company-profile')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition shrink-0 flex items-center gap-1.5 ${
+                activeTab === 'company-profile' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600'
+              }`}
+            >
+              <Building2 className="w-3 h-3 text-indigo-400" />
+              <span>Profil & App</span>
             </button>
             <button
               type="button"
@@ -595,6 +686,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           >
             <DollarSign className={`w-4 h-4 ${activeTab === 'payroll' ? 'text-emerald-400' : 'text-slate-400'}`} />
             <span>Gaji & Lembur</span>
+          </button>
+
+          <button
+            type="button"
+            id="tab-holiday-overtime"
+            onClick={() => setActiveTab('holiday-overtime')}
+            className={`py-2.5 px-3.5 text-xs font-bold whitespace-nowrap rounded-xl flex items-center gap-2 transition cursor-pointer ${
+              activeTab === 'holiday-overtime'
+                ? 'bg-rose-600 text-white shadow-sm shadow-rose-900/20'
+                : 'text-slate-600 hover:bg-rose-50 hover:text-rose-900'
+            }`}
+          >
+            <Calendar className={`w-4 h-4 ${activeTab === 'holiday-overtime' ? 'text-rose-200' : 'text-rose-500'}`} />
+            <span>Lembur Minggu & Libur</span>
           </button>
 
           <button
@@ -667,6 +772,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           >
             <Sliders className={`w-4 h-4 ${activeTab === 'rules' ? 'text-emerald-400' : 'text-slate-400'}`} />
             <span>Kebijakan HR</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('company-profile')}
+            className={`py-2.5 px-3.5 text-xs font-bold whitespace-nowrap rounded-xl flex items-center gap-2 transition cursor-pointer ${
+              activeTab === 'company-profile'
+                ? 'bg-slate-900 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+            }`}
+          >
+            <Building2 className={`w-4 h-4 ${activeTab === 'company-profile' ? 'text-indigo-400' : 'text-slate-400'}`} />
+            <span>Profil & Nama Aplikasi</span>
           </button>
 
           <button
@@ -816,6 +934,45 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </div>
 
+          {/* Quick Overtime Rules Indicator Banner */}
+          <div className="bg-gradient-to-r from-rose-50 via-amber-50 to-indigo-50 border border-rose-200/80 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+            <div className="flex items-start sm:items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                <Calendar className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="font-bold text-slate-900 flex items-center gap-2 flex-wrap">
+                  <span>Kebijakan Lembur Hari Minggu & Tanggal Merah:</span>
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-extrabold bg-rose-600 text-white uppercase tracking-wider">
+                    {localConfig.overtimeHolidayMode === 'custom' ? 'Kustom Perusahaan' : 'Otomatis Kalender Resmi'}
+                  </span>
+                  {localConfig.autoSundayOvertime !== false && (
+                    <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                      Hari Minggu Aktif (2.0x - 4.0x)
+                    </span>
+                  )}
+                  {localConfig.includeCutiBersama !== false && (
+                    <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-blue-100 text-blue-900 border border-blue-200">
+                      + Cuti Bersama
+                    </span>
+                  )}
+                </div>
+                <p className="text-slate-600 text-[11px] mt-0.5">
+                  Lembur hari libur otomatis dikalikan 2.0x (jam 1-7), 3.0x (jam 8), 4.0x (jam 9+) sesuai regulasi PP 35/2021.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              id="btn-manage-holiday-overtime"
+              onClick={() => setActiveTab('holiday-overtime')}
+              className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 text-rose-700 font-bold border border-rose-300 shadow-xs flex items-center justify-center gap-1.5 shrink-0 transition cursor-pointer"
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              <span>Kelola Kalender & Tarif Lembur</span>
+            </button>
+          </div>
+
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden space-y-4">
             <div className="p-4 sm:p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
@@ -824,7 +981,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   Dihitung transparan dari hari hadir, jam kerja reguler, dan kelipatan lembur
                 </p>
               </div>
-              <div className="flex items-center justify-between sm:justify-end gap-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2 text-xs">
+                {/* Template Style Selector for Single Slip Download */}
+                <div className="flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-xl border border-slate-200">
+                  <span className="text-[11px] font-semibold text-slate-600">Template Slip:</span>
+                  <select
+                    value={adminSlipTemplate}
+                    onChange={(e) => setAdminSlipTemplate(e.target.value as PayslipTemplateId)}
+                    className="bg-white text-slate-800 text-xs font-bold rounded-lg px-2 py-1 border border-slate-300 focus:outline-none focus:ring-1 focus:ring-emerald-500 cursor-pointer"
+                  >
+                    {PAYSLIP_TEMPLATES.map((tmpl) => (
+                      <option key={tmpl.id} value={tmpl.id}>
+                        {tmpl.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
                 {/* View Mode Toggle */}
                 <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
                   <button
@@ -873,17 +1046,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                         <span>{s.attendanceDays} Hari ({s.totalWorkHours} Jam)</span>
                       </div>
-                      <div className="flex items-center gap-1 text-indigo-700 font-bold justify-end">
-                        <Sparkles className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-                        <span>Lembur: {s.totalOvertimeHours} Jam</span>
+                      <div className="flex flex-col items-end justify-center">
+                        <div className="flex items-center gap-1 text-indigo-700 font-bold">
+                          <Sparkles className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                          <span>Lembur: {s.totalOvertimeHours} Jam</span>
+                        </div>
+                        {s.holidayOvertimeHours > 0 && (
+                          <span className="text-[10px] text-rose-700 font-bold bg-rose-50 px-1.5 py-0.5 rounded mt-0.5 border border-rose-200">
+                            Libur: {s.holidayOvertimeHours}j ({formatIDR(s.holidayOvertimePay)})
+                          </span>
+                        )}
                       </div>
                     </div>
 
                     <div className="space-y-1.5 text-xs">
                       <div className="flex justify-between text-slate-500">
-                        <span>Gaji Pokok:</span>
-                        <span className="font-mono text-slate-700">{formatIDR(s.baseSalary)}</span>
+                        <span>{s.salaryType === 'daily' ? `Upah Harian (${s.attendanceDays} hari hadir):` : 'Gaji Pokok:'}</span>
+                        <span className="font-mono text-slate-700 font-semibold">
+                          {formatIDR(s.salaryType === 'daily' ? (s.dailyBaseEarnings || s.baseSalary) : s.baseSalary)}
+                        </span>
                       </div>
+                      {s.salaryType === 'daily' && (
+                        <div className="text-[10px] text-emerald-700 font-medium text-right font-mono">
+                          Rate: {formatIDR(s.dailyRate || s.baseSalary)} / hari
+                        </div>
+                      )}
                       <div className="flex justify-between text-emerald-700">
                         <span>Tunjangan & Transport:</span>
                         <span className="font-mono">+{formatIDR(s.allowance + s.transportAllowance)}</span>
@@ -900,11 +1087,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       )}
                     </div>
 
-                    <div className="pt-2.5 border-t border-slate-200 flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-700">Gaji Bersih (Net):</span>
-                      <span className="text-base font-black font-mono text-emerald-700">
-                        {formatIDR(s.netSalary)}
-                      </span>
+                    <div className="pt-2.5 border-t border-slate-200 flex items-center justify-between gap-2">
+                      <div>
+                        <span className="text-[11px] font-bold text-slate-700 block">Gaji Bersih (Net):</span>
+                        <span className="text-base font-black font-mono text-emerald-700">
+                          {formatIDR(s.netSalary)}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadSingleSlip(s)}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer shadow-2xs"
+                        title="Unduh Slip Gaji PDF Resmi Lengkap & Terbilang"
+                      >
+                        <FileText className="w-3.5 h-3.5 text-emerald-700" />
+                        <span>Slip PDF</span>
+                      </button>
                     </div>
                   </div>
                 ))}
@@ -924,6 +1122,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <th className="py-3 px-4 text-right">Uang Lembur</th>
                       <th className="py-3 px-4 text-right">Potongan</th>
                       <th className="py-3 px-4 text-right font-bold">Gaji Bersih (Net)</th>
+                      <th className="py-3 px-4 text-center">Aksi Slip</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-slate-700">
@@ -942,10 +1141,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           {s.attendanceDays} Hari ({s.totalWorkHours} Jam)
                         </td>
                         <td className="py-3 px-4 font-medium text-indigo-700">
-                          {s.totalOvertimeHours} Jam
+                          <div className="font-bold">{s.totalOvertimeHours} Jam</div>
+                          {s.holidayOvertimeHours > 0 && (
+                            <div className="text-[10px] text-rose-700 font-bold whitespace-nowrap flex items-center gap-1 mt-0.5">
+                              <Calendar className="w-2.5 h-2.5 shrink-0" />
+                              <span>Libur: {s.holidayOvertimeHours}j</span>
+                            </div>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-right font-mono">
-                          {formatIDR(s.baseSalary)}
+                          <div className="font-semibold text-slate-900">
+                            {formatIDR(s.salaryType === 'daily' ? (s.dailyBaseEarnings || s.baseSalary) : s.baseSalary)}
+                          </div>
+                          {s.salaryType === 'daily' ? (
+                            <div className="text-[10px] text-emerald-700 font-sans font-semibold">
+                              {s.attendanceDays} hr × {formatIDR(s.dailyRate || 0)}
+                            </div>
+                          ) : (
+                            <div className="text-[10px] text-slate-400 font-sans">
+                              Bulanan Tetap
+                            </div>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-right font-mono text-emerald-700">
                           +{formatIDR(s.allowance + s.transportAllowance)}
@@ -958,6 +1174,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </td>
                         <td className="py-3 px-4 text-right font-mono font-extrabold text-slate-900 text-sm">
                           {formatIDR(s.netSalary)}
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          <button
+                            type="button"
+                            onClick={() => handleDownloadSingleSlip(s)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold text-[11px] transition cursor-pointer shadow-2xs"
+                            title="Unduh Slip Gaji PDF Resmi Lengkap & Terbilang"
+                          >
+                            <FileText className="w-3 h-3 text-emerald-700" />
+                            <span>Slip PDF</span>
+                          </button>
                         </td>
                       </tr>
                     ))}
@@ -1190,6 +1417,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         />
       )}
 
+      {/* TAB: PENGATURAN GAJI LEMBUR HARI MINGGU & TANGGAL MERAH */}
+      {activeTab === 'holiday-overtime' && (
+        <HolidayOvertimeManager
+          config={localConfig}
+          onChangeConfig={(newCfg) => {
+            setLocalConfig(newCfg);
+            onUpdateConfig(newCfg);
+          }}
+          sampleBaseSalary={filteredSummaries[0]?.baseSalary || 10000000}
+        />
+      )}
+
       {/* TAB 3: PUSAT KEBIJAKAN LEMBUR, GPS & TUTUP BUKU */}
       {activeTab === 'rules' && (
         <form onSubmit={handleSaveConfig} className="space-y-6">
@@ -1199,6 +1438,35 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               {saveSuccessMsg}
             </div>
           )}
+
+          {/* Quick Link Card: Profil Perusahaan & Branding Aplikasi */}
+          <div className="bg-gradient-to-r from-indigo-50 via-slate-50 to-emerald-50 p-4 sm:p-5 rounded-2xl border border-indigo-100 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-indigo-900/20">
+                <Building2 className="w-6 h-6" />
+              </div>
+              <div className="space-y-0.5">
+                <div className="font-bold text-sm text-slate-900 flex items-center gap-2">
+                  <span>Profil Perusahaan, Logo & Nama Aplikasi</span>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-700">
+                    Baru & Lengkap
+                  </span>
+                </div>
+                <p className="text-xs text-slate-600">
+                  Perbarui nama sistem, slogan aplikasi, logo perusahaan (upload/URL), kontak kantor, dan pimpinan penandatangan dokumen.
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('company-profile')}
+              className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm shadow-indigo-700/20 transition shrink-0 cursor-pointer flex items-center gap-2"
+            >
+              <span>Ubah Profil & Nama App</span>
+              <ChevronDown className="w-4 h-4 -rotate-90" />
+            </button>
+          </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* Left Card: Tanggal Penggajian & Tutup Buku */}
@@ -1357,6 +1625,71 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   onChange={(e) => setLocalConfig({ ...localConfig, minOvertimeMinutes: Number(e.target.value) })}
                   className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 focus:ring-2 focus:ring-emerald-500 font-mono"
                 />
+              </div>
+            </div>
+
+            {/* Kebijakan Lembur Hari Libur, Hari Minggu & Tanggal Merah */}
+            <div className="lg:col-span-2 bg-gradient-to-br from-rose-50/70 via-white to-amber-50/40 rounded-2xl p-6 border border-rose-200 shadow-sm space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-rose-100">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                    <Calendar className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-slate-900 font-bold text-base">
+                      Kebijakan Lembur Hari Minggu, Hari Tertentu & Tanggal Merah
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Otomatis mengikuti kalender resmi libur nasional & Cuti Bersama RI atau konfigurasi kustom perusahaan
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('holiday-overtime')}
+                  className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs shadow-xs transition flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
+                >
+                  <Sliders className="w-3.5 h-3.5" />
+                  <span>Buka Konfigurasi Lengkap & Simulator Lembur</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+                <div className="bg-white p-4 rounded-xl border border-rose-100 shadow-2xs space-y-2">
+                  <span className="text-slate-500 font-medium block">Mode Perhitungan:</span>
+                  <div className="font-extrabold text-sm text-slate-900">
+                    {localConfig.overtimeHolidayMode === 'custom' ? '⚙️ Kustom Perusahaan' : '📅 Otomatis Kalender Resmi'}
+                  </div>
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    {localConfig.overtimeHolidayMode === 'custom'
+                      ? 'Menggunakan daftar hari libur & multiplier yang Anda tetapkan secara kustom di database.'
+                      : 'Otomatis mendeteksi 17+ tanggal merah nasional Indonesia & Cuti Bersama resmi SKB 3 Menteri.'}
+                  </p>
+                </div>
+
+                <div className="bg-white p-4 rounded-xl border border-rose-100 shadow-2xs space-y-2">
+                  <span className="text-slate-500 font-medium block">Hari Libur Mingguan (Weekend):</span>
+                  <div className="font-extrabold text-sm text-slate-900">
+                    {localConfig.customWeekendDays && localConfig.customWeekendDays.length > 0
+                      ? localConfig.customWeekendDays.map(d => ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'][d]).join(', ')
+                      : 'Minggu (Default)'}
+                  </div>
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    Absensi lembur pada hari-hari ini otomatis dihitung dengan tarif hari libur (Tier 2.0x - 4.0x).
+                  </p>
+                </div>
+
+                <div className="bg-white p-4 rounded-xl border border-rose-100 shadow-2xs space-y-2">
+                  <span className="text-slate-500 font-medium block">Formula Tarif Lembur Libur:</span>
+                  <div className="font-mono font-bold text-xs text-rose-700">
+                    {localConfig.holidayOvertimeTiers && localConfig.holidayOvertimeTiers.length > 0
+                      ? localConfig.holidayOvertimeTiers.map(t => `${t.multiplier}x (Jam ${t.fromHour}-${t.toHour ?? '+'})`).join(', ')
+                      : '2.0x (1-7j), 3.0x (8j), 4.0x (9j+)'}
+                  </div>
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    Sesuai Peraturan Pemerintah RI No. 35 Tahun 2021 tentang upah kerja lembur hari istirahat mingguan.
+                  </p>
+                </div>
               </div>
             </div>
 
@@ -1556,6 +1889,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </button>
           </div>
         </form>
+      )}
+
+      {/* TAB: PROFIL PERUSAHAAN & BRANDING NAMA APLIKASI */}
+      {activeTab === 'company-profile' && (
+        <CompanyProfileSettings
+          config={localConfig}
+          onUpdateConfig={(newConfig) => {
+            setLocalConfig(newConfig);
+            onUpdateConfig(newConfig);
+          }}
+          onShowToast={(msg) => {
+            setSaveSuccessMsg(msg);
+            setTimeout(() => setSaveSuccessMsg(''), 4000);
+          }}
+        />
       )}
 
       {/* TAB 4: INTEGRASI SPREADSHEET (BASIS DATA UTAMA) */}
@@ -1885,9 +2233,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             </span>
                           </div>
                         )}
-                        <div className="flex justify-between">
-                          <span className="text-slate-500">Gaji Pokok:</span>
-                          <span className="font-mono text-slate-900 font-semibold">{formatIDR(emp.baseSalary)}</span>
+                        <div className="flex justify-between items-center">
+                          <span className="text-slate-500">Skema & Gaji:</span>
+                          <div className="text-right">
+                            <span className="font-mono text-slate-900 font-bold text-xs">
+                              {emp.salaryType === 'daily'
+                                ? `${formatIDR(emp.dailyRate || emp.baseSalary)} /hari`
+                                : formatIDR(emp.baseSalary)}
+                            </span>
+                            <span className={`block text-[10px] font-semibold ${
+                              emp.salaryType === 'daily' ? 'text-emerald-700' : 'text-slate-500'
+                            }`}>
+                              {emp.salaryType === 'daily' ? 'Upah Harian' : 'Bulanan Tetap'}
+                            </span>
+                          </div>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-slate-500">Tunjangan:</span>
@@ -1962,8 +2321,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               )}
                             </div>
                           </td>
-                          <td className="py-3 px-4 text-right font-mono font-medium">
-                            {formatIDR(emp.baseSalary)}
+                          <td className="py-3 px-4 text-right">
+                            <div className="font-mono font-bold text-slate-900">
+                              {emp.salaryType === 'daily'
+                                ? `${formatIDR(emp.dailyRate || emp.baseSalary)} /hari`
+                                : formatIDR(emp.baseSalary)}
+                            </div>
+                            <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.2 rounded mt-0.5 ${
+                              emp.salaryType === 'daily'
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-slate-100 text-slate-600'
+                            }`}>
+                              {emp.salaryType === 'daily' ? 'Upah Harian' : 'Bulanan Tetap'}
+                            </span>
                           </td>
                           <td className="py-3 px-4 text-right font-mono text-emerald-700 font-medium">
                             {formatIDR(emp.allowance)}
@@ -2059,6 +2429,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         onClose={() => setEmployeeToEdit(null)}
         onSave={handleSaveEmployee}
         employee={employeeToEdit}
+        employeeToEdit={employeeToEdit}
         shifts={shifts}
         existingEmployees={employees}
       />
@@ -2067,7 +2438,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       <DeleteEmployeeModal
         isOpen={Boolean(employeeToDelete)}
         onClose={() => setEmployeeToDelete(null)}
+        onDeletePermanent={handleDeleteEmployeeConfirm}
         onConfirm={handleDeleteEmployeeConfirm}
+        onToggleActive={(empId) => {
+          const emp = employees.find((e) => e.id.trim().toUpperCase() === empId.trim().toUpperCase());
+          if (emp) {
+            const nextActive = emp.isActive === false ? true : false;
+            const updated = employees.map((e) =>
+              e.id.trim().toUpperCase() === empId.trim().toUpperCase() ? { ...e, isActive: nextActive } : e
+            );
+            onUpdateEmployees(updated);
+            setEmployeeToDelete(null);
+            onSendPushNotification(
+              nextActive ? 'Aktivasi Karyawan' : 'Penonaktifan Karyawan',
+              `Karyawan ${emp.name} (${emp.id}) telah ${nextActive ? 'diaktifkan' : 'dinonaktifkan'}.`,
+              'info'
+            );
+          }
+        }}
         employee={employeeToDelete}
       />
 
@@ -2095,6 +2483,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         currentAdminPassword={config.adminPassword}
         currentAdminUsername={config.adminUsername}
         onSave={handleChangeAdminPassword}
+      />
+
+      {/* Modal Penugasan Khusus / Luar Kota */}
+      <TemporaryDutyModal
+        isOpen={isDutyModalOpen}
+        onClose={() => setIsDutyModalOpen(false)}
+        employees={employees}
+        assignments={assignments}
+        onSaveAssignment={(newAssignment) => {
+          if (onSaveAssignment) {
+            onSaveAssignment(newAssignment);
+          }
+          onSendPushNotification(
+            'Penugasan Luar Kota Baru',
+            `Penugasan "${newAssignment.title}" di ${newAssignment.city} telah dibuat untuk karyawan terkait.`,
+            'info'
+          );
+        }}
+        onUpdateStatus={(id, status) => {
+          if (onUpdateAssignmentStatus) {
+            onUpdateAssignmentStatus(id, status);
+          }
+        }}
+        onDeleteAssignment={(id) => {
+          if (onDeleteAssignment) {
+            onDeleteAssignment(id);
+          }
+        }}
       />
 
       {/* Admin Dashboard Watermark Footer Note */}

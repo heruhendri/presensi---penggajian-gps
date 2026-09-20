@@ -24,9 +24,11 @@ import {
   BarChart3,
   List,
   LayoutGrid,
-  Compass
+  Compass,
+  ShieldAlert,
+  Lock
 } from 'lucide-react';
-import { AttendanceRecord, CompanyConfig, Employee, Shift, WorkReport } from '../types';
+import { AttendanceRecord, CompanyConfig, Employee, Shift, WorkReport, TemporaryLocationAssignment } from '../types';
 import { 
   calculateDistanceMeters, 
   formatDistance, 
@@ -35,7 +37,7 @@ import {
   getOffsetCoordinates
 } from '../utils/geo';
 import { computeEmployeePayroll, formatIDR, getPayrollCycleInfo } from '../utils/payroll';
-import { exportSingleEmployeeSlipPDF } from '../utils/exportPdf';
+import { exportSingleEmployeeSlipPDF, PAYSLIP_TEMPLATES, PayslipTemplateId } from '../utils/exportPdf';
 import { WorkReportModal } from './WorkReportModal';
 import { EmployeePerformanceCharts } from './EmployeePerformanceCharts';
 import { AttendanceMapsDashboard } from './AttendanceMapsDashboard';
@@ -46,6 +48,7 @@ interface EmployeePortalProps {
   config: CompanyConfig;
   attendanceRecords: AttendanceRecord[];
   workReports?: WorkReport[];
+  assignments?: TemporaryLocationAssignment[];
   onSubmitWorkReport?: (reportData: Partial<WorkReport>) => void;
   onCheckIn: (record: Partial<AttendanceRecord>) => void;
   onCheckOut: (recordId: string, checkOutData: Partial<AttendanceRecord>) => void;
@@ -57,6 +60,7 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
   config,
   attendanceRecords,
   workReports = [],
+  assignments = [],
   onSubmitWorkReport,
   onCheckIn,
   onCheckOut,
@@ -76,9 +80,14 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
   const [currentLng, setCurrentLng] = useState<number>(config.officeLng);
   const [gpsAccuracy, setGpsAccuracy] = useState<number>(8);
   const [isGettingLocation, setIsGettingLocation] = useState(false);
+  const [isVerifyingBeforeAction, setIsVerifyingBeforeAction] = useState<'checkin' | 'checkout' | null>(null);
+  const [lastLocationCheckTime, setLastLocationCheckTime] = useState<Date | null>(null);
+  const [autoGpsStatus, setAutoGpsStatus] = useState<'verified' | 'checking' | 'error' | 'idle'>('idle');
   const [gpsError, setGpsError] = useState<string | null>(null);
-  const [gpsSourceMode, setGpsSourceMode] = useState<'device' | 'preset'>('preset');
-  const [activeLocationPreset, setActiveLocationPreset] = useState<string>('office_center');
+  const [gpsSourceMode, setGpsSourceMode] = useState<'device' | 'preset'>('device');
+  const [activeLocationPreset, setActiveLocationPreset] = useState<string>('device_real');
+  const [showDiagnosticTools, setShowDiagnosticTools] = useState(false);
+  const [selectedSlipTemplate, setSelectedSlipTemplate] = useState<PayslipTemplateId>('corporate-emerald');
 
   // Geofence Radius Out-of-bounds Alert Modal
   const [radiusAlertModalOpen, setRadiusAlertModalOpen] = useState(false);
@@ -100,6 +109,37 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
     return () => clearInterval(timer);
   }, []);
 
+  // Automatic real location check on portal mount - MUST use real device GPS sensor
+  useEffect(() => {
+    if (typeof navigator !== 'undefined' && navigator.geolocation) {
+      setAutoGpsStatus('checking');
+      getCurrentCoordinates({ enableHighAccuracy: true, timeout: 8000 })
+        .then((coords) => {
+          setCurrentLat(coords.lat);
+          setCurrentLng(coords.lng);
+          setGpsAccuracy(coords.accuracy);
+          setGpsSourceMode('device');
+          setActiveLocationPreset('device_real');
+          setLastLocationCheckTime(new Date());
+          setAutoGpsStatus('verified');
+        })
+        .catch((err: any) => {
+          // Never fall back to simulated office center; real hardware sensor status is required
+          setGpsSourceMode('device');
+          setActiveLocationPreset('device_real');
+          setAutoGpsStatus('error');
+          setGpsError(err.message || 'Izin akses lokasi (GPS) belum aktif. Aktifkan GPS pada perangkat untuk presensi.');
+          setLastLocationCheckTime(new Date());
+        });
+    } else {
+      setGpsSourceMode('device');
+      setActiveLocationPreset('device_real');
+      setAutoGpsStatus('error');
+      setGpsError('Browser perangkat tidak mendukung Geolocation GPS.');
+      setLastLocationCheckTime(new Date());
+    }
+  }, []);
+
   // Find employee's assigned shift
   const currentShift = shifts.find((s) => s.id === employee.currentShiftId) || shifts[0];
 
@@ -111,22 +151,87 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
     (r) => r.employeeId === employee.id && r.date === todayStr
   );
 
-  // Calculate Distance to Office
+  // Active temporary out-of-town / project duty assignment check for today
+  const activeDuty = assignments?.find(
+    (a) =>
+      a.employeeId === employee.id &&
+      a.status === 'active' &&
+      todayStr >= a.startDate &&
+      todayStr <= a.endDate
+  );
+
+  // Target coordinates and allowed radius based on active duty assignment or primary office
+  const targetLat = activeDuty ? activeDuty.lat : config.officeLat;
+  const targetLng = activeDuty ? activeDuty.lng : config.officeLng;
+  const targetRadiusMeters = activeDuty ? activeDuty.radiusMeters : config.officeRadiusMeters;
+  const targetLocationTitle = activeDuty
+    ? `Penugasan Luar Kota: ${activeDuty.title} (${activeDuty.locationName}, ${activeDuty.city})`
+    : config.companyName;
+
+  // Calculate Distance to designated Target location
   const distanceToOffice = calculateDistanceMeters(
     currentLat,
     currentLng,
-    config.officeLat,
-    config.officeLng
+    targetLat,
+    targetLng
   );
-  const isInsideRadius = distanceToOffice <= config.officeRadiusMeters;
+  const isInsideRadius = distanceToOffice <= targetRadiusMeters;
 
   // Real-time payroll calculation for this employee
-  const payrollSummary = computeEmployeePayroll(employee, attendanceRecords, config);
+  const payrollSummary = computeEmployeePayroll(employee, attendanceRecords, config, todayStr);
   const cycleInfo = getPayrollCycleInfo(config);
+
+  // Mandatory automatic location check before check-in or check-out to ensure coordinate accuracy
+  // STRICT RULE: Attendance MUST ALWAYS use real hardware sensor. Simulated presets are strictly disallowed for check-in / check-out.
+  const verifyLocationAccurately = async (): Promise<{
+    lat: number;
+    lng: number;
+    accuracy: number;
+    distance: number;
+    isInside: boolean;
+    isRealSensor: boolean;
+  }> => {
+    setIsGettingLocation(true);
+    setAutoGpsStatus('checking');
+    setGpsError(null);
+
+    let lat = currentLat;
+    let lng = currentLng;
+    let accuracy = gpsAccuracy;
+
+    try {
+      // Always query fresh hardware satellite coordinates for attendance
+      const fresh = await getCurrentCoordinates({ enableHighAccuracy: true, timeout: 10000 });
+      lat = fresh.lat;
+      lng = fresh.lng;
+      accuracy = fresh.accuracy;
+      setCurrentLat(lat);
+      setCurrentLng(lng);
+      setGpsAccuracy(accuracy);
+      setGpsSourceMode('device');
+      setActiveLocationPreset('device_real');
+
+      const distance = calculateDistanceMeters(lat, lng, targetLat, targetLng);
+      const isInside = distance <= targetRadiusMeters;
+      setLastLocationCheckTime(new Date());
+      setAutoGpsStatus('verified');
+      return { lat, lng, accuracy, distance, isInside, isRealSensor: true };
+    } catch (err: any) {
+      setAutoGpsStatus('error');
+      const msg = err.message || 'Gagal membaca sensor GPS perangkat asli. Izin lokasi (GPS) diperlukan untuk presensi.';
+      setGpsError(msg);
+      const distance = calculateDistanceMeters(lat, lng, targetLat, targetLng);
+      // When real sensor fails, attendance is STRICTLY disallowed
+      return { lat, lng, accuracy, distance, isInside: false, isRealSensor: false };
+    } finally {
+      setIsGettingLocation(false);
+    }
+  };
 
   // Fetch Real GPS coordinates from device with high-accuracy satellite signal
   const handleDetectGPS = async () => {
     setIsGettingLocation(true);
+    setAutoGpsStatus('checking');
     setGpsError(null);
     setCheckInSuccessBanner(null);
     try {
@@ -136,8 +241,11 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
       setGpsAccuracy(coords.accuracy);
       setGpsSourceMode('device');
       setActiveLocationPreset('device_real');
+      setLastLocationCheckTime(new Date());
+      setAutoGpsStatus('verified');
     } catch (err: any) {
-      setGpsError(err.message || 'Gagal mendeteksi koordinat GPS.');
+      setAutoGpsStatus('error');
+      setGpsError(err.message || 'Gagal mendeteksi koordinat GPS. Pastikan izin lokasi diberikan.');
     } finally {
       setIsGettingLocation(false);
     }
@@ -155,44 +263,84 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
     }
 
     setGpsSourceMode('preset');
+    setLastLocationCheckTime(new Date());
+    setAutoGpsStatus('verified');
+
     switch (presetKey) {
       case 'office_center':
-        setCurrentLat(config.officeLat);
-        setCurrentLng(config.officeLng);
+      case 'duty_center':
+      case 'assigned_duty':
+        // Exactly at designated target coordinates (distance = 0m, 100% inside)
+        setCurrentLat(targetLat);
+        setCurrentLng(targetLng);
         setGpsAccuracy(5);
         break;
-      case 'lobby': {
-        const coords = getOffsetCoordinates(config.officeLat, config.officeLng, 18, 45);
+
+      case 'lobby':
+      case 'duty_lobby': {
+        // ~15m from target (well inside standard 50m radius)
+        const offsetDist = Math.min(15, Math.max(5, Math.round(targetRadiusMeters * 0.3)));
+        const coords = getOffsetCoordinates(targetLat, targetLng, offsetDist, 45);
         setCurrentLat(coords.lat);
         setCurrentLng(coords.lng);
         setGpsAccuracy(8);
         break;
       }
-      case 'parking': {
-        const coords = getOffsetCoordinates(config.officeLat, config.officeLng, 38, 120);
+
+      case 'parking':
+      case 'duty_perimeter': {
+        // ~35m or 70% of radius (still safely inside)
+        const offsetDist = Math.min(38, Math.max(10, Math.round(targetRadiusMeters * 0.7)));
+        const coords = getOffsetCoordinates(targetLat, targetLng, offsetDist, 120);
         setCurrentLat(coords.lat);
         setCurrentLng(coords.lng);
         setGpsAccuracy(12);
         break;
       }
-      case 'outside_close': {
-        const coords = getOffsetCoordinates(config.officeLat, config.officeLng, config.officeRadiusMeters + 35, 90);
+
+      case 'outside_close':
+      case 'outside_duty': {
+        // Strictly outside radius (+35m beyond targetRadiusMeters) -> DITOLAK
+        const offsetDist = targetRadiusMeters + 35;
+        const coords = getOffsetCoordinates(targetLat, targetLng, offsetDist, 90);
         setCurrentLat(coords.lat);
         setCurrentLng(coords.lng);
-        setGpsAccuracy(18);
+        setGpsAccuracy(16);
         break;
       }
+
       case 'outside_far': {
-        const coords = getOffsetCoordinates(config.officeLat, config.officeLng, 2800, 210);
+        // ~2.5 km away (completely outside -> DITOLAK)
+        const coords = getOffsetCoordinates(targetLat, targetLng, 2500, 210);
         setCurrentLat(coords.lat);
         setCurrentLng(coords.lng);
-        setGpsAccuracy(45);
+        setGpsAccuracy(35);
         break;
       }
+
+      case 'outside_city': {
+        // ~45 km away (out of town / different area -> DITOLAK)
+        const coords = getOffsetCoordinates(targetLat, targetLng, 45000, 315);
+        setCurrentLat(coords.lat);
+        setCurrentLng(coords.lng);
+        setGpsAccuracy(55);
+        break;
+      }
+
+      case 'weak_signal': {
+        // Low accuracy signal & outside radius (+85m) -> DITOLAK
+        const offsetDist = targetRadiusMeters + 85;
+        const coords = getOffsetCoordinates(targetLat, targetLng, offsetDist, 180);
+        setCurrentLat(coords.lat);
+        setCurrentLng(coords.lng);
+        setGpsAccuracy(120);
+        break;
+      }
+
       default:
-        setCurrentLat(config.officeLat);
-        setCurrentLng(config.officeLng);
-        setGpsAccuracy(10);
+        setCurrentLat(targetLat);
+        setCurrentLng(targetLng);
+        setGpsAccuracy(8);
     }
   };
 
@@ -213,41 +361,55 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
     setPhotoPreview(dataUrl);
   };
 
-  // Check-In verification with exact high-precision radius calculation
+  // Check-In verification with automatic real location verification
   const handlePerformCheckIn = async () => {
-    let lat = currentLat;
-    let lng = currentLng;
-    let accuracy = gpsAccuracy;
-
-    // If using real device GPS mode, refresh fresh coordinates
-    if (gpsSourceMode === 'device') {
-      setIsGettingLocation(true);
-      try {
-        const fresh = await getCurrentCoordinates({ enableHighAccuracy: true, timeout: 8000 });
-        lat = fresh.lat;
-        lng = fresh.lng;
-        accuracy = fresh.accuracy;
-        setCurrentLat(lat);
-        setCurrentLng(lng);
-        setGpsAccuracy(accuracy);
-      } catch (err) {
-        // Fall back to current coordinates if refresh takes too long
-      } finally {
-        setIsGettingLocation(false);
-      }
+    // 0. Simulation Lock: Presensi DILARANG menggunakan titik simulasi/preset
+    if (activeLocationPreset !== 'device_real') {
+      setGpsError('Presensi Ditolak: Anda sedang berada dalam mode simulasi uji radar. Presensi resmi WAJIB menggunakan Sensor GPS Asli dari hardware perangkat Anda.');
+      setRadiusAlertData({
+        distance: distanceToOffice,
+        allowedRadius: targetRadiusMeters,
+        excess: Math.max(1, distanceToOffice - targetRadiusMeters),
+        accuracy: gpsAccuracy,
+      });
+      setRadiusAlertModalOpen(true);
+      return;
     }
 
-    // High precision distance check
-    const currentDistance = calculateDistanceMeters(lat, lng, config.officeLat, config.officeLng);
-    const isWithinGeofence = currentDistance <= config.officeRadiusMeters;
-
-    if (!isWithinGeofence) {
-      const excess = currentDistance - config.officeRadiusMeters;
+    // 1. Strict Geofence Pre-Check: immediately block if outside radius
+    if (!isInsideRadius) {
+      const excess = Math.max(1, distanceToOffice - targetRadiusMeters);
       setRadiusAlertData({
-        distance: currentDistance,
-        allowedRadius: config.officeRadiusMeters,
+        distance: distanceToOffice,
+        allowedRadius: targetRadiusMeters,
         excess,
-        accuracy,
+        accuracy: gpsAccuracy,
+      });
+      setRadiusAlertModalOpen(true);
+      return;
+    }
+
+    setIsVerifyingBeforeAction('checkin');
+    setCheckInSuccessBanner(null);
+
+    // Mandatory automatic real hardware sensor check before check-in to ensure coordinate accuracy
+    const locResult = await verifyLocationAccurately();
+    setIsVerifyingBeforeAction(null);
+
+    // CRITICAL: Block if real hardware sensor was not acquired
+    if (!locResult.isRealSensor) {
+      setGpsError('Gagal memverifikasi sensor GPS perangkat asli. Aktifkan GPS dan berikan izin lokasi pada browser Anda untuk check-in.');
+      return;
+    }
+
+    // CRITICAL: Strict Geofence Enforcement for Check-In
+    if (!locResult.isInside) {
+      const excess = Math.max(1, locResult.distance - targetRadiusMeters);
+      setRadiusAlertData({
+        distance: locResult.distance,
+        allowedRadius: targetRadiusMeters,
+        excess,
+        accuracy: locResult.accuracy,
       });
       setRadiusAlertModalOpen(true);
       return;
@@ -261,33 +423,91 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
     const nowTotalMins = currentTime.getHours() * 60 + currentTime.getMinutes();
     const isLate = nowTotalMins > (shiftStartTotalMins + currentShift.gracePeriodMinutes);
 
+    const isDuty = !!activeDuty;
+    const locLabel = isDuty ? `Penugasan Luar Kota (${activeDuty.city})` : 'Kantor';
+
     onCheckIn({
       employeeId: employee.id,
       employeeName: employee.name,
       department: employee.department,
       date: todayStr,
       checkInTime: checkInTimeStr,
-      checkInLat: lat,
-      checkInLng: lng,
-      checkInDistanceMeters: currentDistance,
-      checkInAddress: `Terverifikasi GPS (${formatDistance(currentDistance)} dari titik pusat kantor, Akurasi ±${Math.round(accuracy)}m)`,
+      checkInLat: locResult.lat,
+      checkInLng: locResult.lng,
+      checkInDistanceMeters: locResult.distance,
+      isRemoteOrOutIsland: isDuty,
+      remoteReasonType: isDuty ? 'dinas_luar_kota' : undefined,
+      checkInAddress: isDuty
+        ? `Terverifikasi Titik Tugas Khusus: ${activeDuty.title} di ${activeDuty.city} (${formatDistance(locResult.distance)} dari koordinat, Akurasi ±${Math.round(locResult.accuracy)}m)`
+        : `Terverifikasi GPS Otomatis (${formatDistance(locResult.distance)} dari titik pusat kantor, Akurasi ±${Math.round(locResult.accuracy)}m)`,
       status: isLate ? 'terlambat' : 'hadir',
       workDurationHours: 0,
       overtimeHours: 0,
       overtimePay: 0,
       isOvertimeApproved: false,
-      notes: attendanceNotes || (isLate ? 'Presensi terlambat' : 'Presensi tepat waktu terverifikasi'),
+      notes: attendanceNotes || (isDuty ? `[Penugasan Khusus: ${activeDuty.city} - ${activeDuty.title}] ${isLate ? 'Presensi terlambat' : 'Presensi tepat waktu'}` : (isLate ? 'Presensi terlambat' : 'Presensi tepat waktu terverifikasi')),
     });
 
     setCheckInSuccessBanner(
-      `Check-in berhasil tercatat! Posisi terverifikasi akurat di dalam radius kantor (${formatDistance(currentDistance)} dari pusat kantor, Akurasi: ±${Math.round(accuracy)}m).`
+      `Check-in berhasil tercatat! Lokasi GPS otomatis terkunci: Lat ${locResult.lat.toFixed(6)}, Lng ${locResult.lng.toFixed(6)} (${formatDistance(locResult.distance)} dari ${locLabel}, Akurasi: ±${Math.round(locResult.accuracy)}m).`
     );
     setAttendanceNotes('');
   };
 
-  const proceedCheckOut = () => {
+  const proceedCheckOut = async () => {
     setShowCheckoutPrompt(false);
     if (!todayRecord) return;
+
+    // 0. Simulation Lock: Check-Out DILARANG menggunakan titik simulasi/preset
+    if (activeLocationPreset !== 'device_real') {
+      setGpsError('Check-Out Ditolak: Anda sedang berada dalam mode simulasi uji radar. Presensi resmi WAJIB menggunakan Sensor GPS Asli dari hardware perangkat Anda.');
+      setRadiusAlertData({
+        distance: distanceToOffice,
+        allowedRadius: targetRadiusMeters,
+        excess: Math.max(1, distanceToOffice - targetRadiusMeters),
+        accuracy: gpsAccuracy,
+      });
+      setRadiusAlertModalOpen(true);
+      return;
+    }
+
+    // Strict Geofence Pre-Check: immediately block if outside radius
+    if (!isInsideRadius) {
+      const excess = Math.max(1, distanceToOffice - targetRadiusMeters);
+      setRadiusAlertData({
+        distance: distanceToOffice,
+        allowedRadius: targetRadiusMeters,
+        excess,
+        accuracy: gpsAccuracy,
+      });
+      setRadiusAlertModalOpen(true);
+      return;
+    }
+
+    setIsVerifyingBeforeAction('checkout');
+    // Mandatory automatic location check before check-out using real hardware sensor
+    const locResult = await verifyLocationAccurately();
+    setIsVerifyingBeforeAction(null);
+
+    // CRITICAL: Block if real hardware sensor was not acquired
+    if (!locResult.isRealSensor) {
+      setGpsError('Gagal memverifikasi sensor GPS perangkat asli. Aktifkan GPS dan berikan izin lokasi pada browser Anda untuk check-out.');
+      return;
+    }
+
+    // CRITICAL: Strict Geofence Enforcement for Check-Out
+    if (!locResult.isInside) {
+      const excess = Math.max(1, locResult.distance - targetRadiusMeters);
+      setRadiusAlertData({
+        distance: locResult.distance,
+        allowedRadius: targetRadiusMeters,
+        excess,
+        accuracy: locResult.accuracy,
+      });
+      setRadiusAlertModalOpen(true);
+      return;
+    }
+
     const checkOutTimeStr = currentTime.toTimeString().slice(0, 8);
 
     // Calculate actual work duration from checkInTime
@@ -310,21 +530,44 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
       overtimeHours = Math.round(((nowTotalMins - shiftEndTotalMins) / 60) * 10) / 10;
     }
 
+    const isDuty = !!activeDuty;
+    const locLabel = isDuty ? `Penugasan Luar Kota (${activeDuty.city})` : 'Kantor';
+
     onCheckOut(todayRecord.id, {
       checkOutTime: checkOutTimeStr,
-      checkOutLat: currentLat,
-      checkOutLng: currentLng,
-      checkOutDistanceMeters: distanceToOffice,
-      checkOutAddress: `Terverifikasi GPS (${formatDistance(distanceToOffice)} dari kantor)`,
+      checkOutLat: locResult.lat,
+      checkOutLng: locResult.lng,
+      checkOutDistanceMeters: locResult.distance,
+      checkOutAddress: isDuty
+        ? `Terverifikasi Titik Tugas Pulang: ${activeDuty.city} (${formatDistance(locResult.distance)} dari koordinat, Akurasi ±${Math.round(locResult.accuracy)}m)`
+        : `Terverifikasi GPS Otomatis Pulang (${formatDistance(locResult.distance)} dari kantor, Akurasi ±${Math.round(locResult.accuracy)}m)`,
       workDurationHours: durationHours,
       overtimeHours,
       status: overtimeHours > 0 ? 'lembur' : todayRecord.status,
       notes: todayRecord.notes + (overtimeHours > 0 ? ` | Lembur tercatat: ${overtimeHours} jam` : ''),
     });
+
+    setCheckInSuccessBanner(
+      `Check-out berhasil diverifikasi! Lokasi kepulangan otomatis terkunci: Lat ${locResult.lat.toFixed(6)}, Lng ${locResult.lng.toFixed(6)} (${formatDistance(locResult.distance)} dari ${locLabel}, Durasi Kerja: ${durationHours} Jam).`
+    );
   };
 
   const handlePerformCheckOut = () => {
     if (!todayRecord) return;
+
+    // Strict Geofence Pre-Check: immediately block if outside radius
+    if (!isInsideRadius) {
+      const excess = Math.max(1, distanceToOffice - targetRadiusMeters);
+      setRadiusAlertData({
+        distance: distanceToOffice,
+        allowedRadius: targetRadiusMeters,
+        excess,
+        accuracy: gpsAccuracy,
+      });
+      setRadiusAlertModalOpen(true);
+      return;
+    }
+
     // If employee is required to report and has not submitted today's report
     if (employee.requiresWorkReport && !todayReport) {
       setShowCheckoutPrompt(true);
@@ -568,6 +811,52 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
       {/* TAB 1 CONTENT: GPS CHECK-IN & SALARY ESTIMATOR */}
       {activePortalTab === 'attendance' && (
         <>
+          {/* Active Temporary Out-of-Town Assignment Banner */}
+          {activeDuty && (
+            <div className="mb-6 p-5 rounded-2xl bg-gradient-to-r from-purple-900 via-indigo-950 to-slate-900 text-white shadow-xl border border-purple-500/30 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-start gap-3.5">
+                <div className="w-12 h-12 rounded-2xl bg-purple-500/20 border border-purple-400/30 text-purple-300 flex items-center justify-center shrink-0 shadow-inner">
+                  <MapPin className="w-6 h-6" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-purple-400 text-purple-950 tracking-wider uppercase">
+                      Penugasan Luar Kota Aktif
+                    </span>
+                    <span className="text-xs font-bold text-purple-200">
+                      📍 {activeDuty.city}
+                    </span>
+                  </div>
+                  <h3 className="text-base font-black text-white mt-1">
+                    {activeDuty.title}
+                  </h3>
+                  <p className="text-xs text-purple-200/90 mt-0.5">
+                    Lokasi: <span className="font-semibold text-white">{activeDuty.locationName}</span> • Toleransi Radius: <strong className="text-emerald-400 font-mono">{activeDuty.radiusMeters} meter</strong>.
+                  </p>
+                  <p className="text-[11px] text-purple-300/80 mt-1">
+                    Periode Berlaku: {activeDuty.startDate} s/d {activeDuty.endDate}. Catatan: {activeDuty.notes || 'Penugasan khusus proyek resmi'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCurrentLat(activeDuty.lat);
+                    setCurrentLng(activeDuty.lng);
+                    setGpsAccuracy(8);
+                    setActiveLocationPreset('assigned_duty');
+                    setGpsSourceMode('preset');
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-purple-500 hover:bg-purple-400 text-purple-950 font-extrabold text-xs shadow-md transition cursor-pointer flex items-center gap-1.5"
+                >
+                  <Navigation className="w-4 h-4" />
+                  <span>Kunci Titik Penugasan</span>
+                </button>
+              </div>
+            </div>
+          )}
 
       {/* Main 2-Column Grid: GPS Check-in & Real-Time Salary Estimator */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -586,11 +875,11 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
               }`}>
                 {isInsideRadius ? (
                   <>
-                    <ShieldCheck className="w-3.5 h-3.5" /> Dalam Radius Kantor
+                    <ShieldCheck className="w-3.5 h-3.5" /> Dalam Radius {activeDuty ? 'Penugasan' : 'Kantor'}
                   </>
                 ) : (
                   <>
-                    <AlertTriangle className="w-3.5 h-3.5" /> Di Luar Radius Kantor
+                    <AlertTriangle className="w-3.5 h-3.5" /> Di Luar Radius {activeDuty ? 'Penugasan' : 'Kantor'}
                   </>
                 )}
               </span>
@@ -615,17 +904,80 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
                 </div>
               )}
 
-              {/* Location Mode & Signal Quality Selector */}
-              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+              {/* Status Pengecekan Lokasi Otomatis */}
+              <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+                  <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                    <Navigation className={`w-4 h-4 ${isGettingLocation ? 'text-amber-500 animate-spin' : 'text-emerald-600'}`} />
+                    Pengecekan Lokasi GPS Otomatis
+                  </span>
+                  <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 ${
+                    autoGpsStatus === 'checking'
+                      ? 'bg-amber-100 text-amber-800'
+                      : autoGpsStatus === 'verified'
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-rose-100 text-rose-800'
+                  }`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${
+                      autoGpsStatus === 'checking'
+                        ? 'bg-amber-500 animate-ping'
+                        : autoGpsStatus === 'verified'
+                        ? 'bg-emerald-500'
+                        : 'bg-rose-500'
+                    }`} />
+                    {autoGpsStatus === 'checking'
+                      ? 'Mengunci Koordinat...'
+                      : autoGpsStatus === 'verified'
+                      ? 'Lokasi Terkunci Akurat'
+                      : 'Perlu Cek Ulang'}
+                  </span>
+                </div>
+
+                <div className="text-[11px] text-slate-600 space-y-1">
+                  <div className="flex justify-between">
+                    <span>Koordinat Anda:</span>
+                    <span className="font-mono font-bold text-slate-900">
+                      {currentLat.toFixed(6)}, {currentLng.toFixed(6)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Tingkat Presisi GPS:</span>
+                    <span className="font-semibold text-emerald-700">
+                      ±{Math.round(gpsAccuracy)} meter ({getGpsAccuracyLevel(gpsAccuracy).label})
+                    </span>
+                  </div>
+                  {lastLocationCheckTime && (
+                    <div className="flex justify-between text-[10px] text-slate-400">
+                      <span>Terakhir Diperiksa:</span>
+                      <span>{lastLocationCheckTime.toLocaleTimeString('id-ID')} WIB</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={handleDetectGPS}
+                    disabled={isGettingLocation}
+                    className="w-full py-2 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer shadow-2xs"
+                  >
+                    <Compass className={`w-3.5 h-3.5 text-emerald-600 ${isGettingLocation ? 'animate-spin' : ''}`} />
+                    <span>{isGettingLocation ? 'Memeriksa Satelit GPS...' : 'Cek Ulang Lokasi GPS Sekarang'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Location Mode & Signal Quality Selector */}
+              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
                     <Compass className="w-4 h-4 text-emerald-600" />
                     Sumber & Uji Sinyal GPS
                   </span>
                   {(() => {
                     const accInfo = getGpsAccuracyLevel(gpsAccuracy);
                     return (
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 ${
+                      <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 ${
                         accInfo.level === 'high'
                           ? 'bg-emerald-100 text-emerald-800'
                           : accInfo.level === 'medium'
@@ -641,27 +993,176 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
                   })()}
                 </div>
 
-                <select
-                  value={activeLocationPreset}
-                  onChange={(e) => handleSelectLocationPreset(e.target.value)}
-                  className="w-full text-xs bg-white border border-slate-300 rounded-lg px-2.5 py-2 text-slate-800 font-medium focus:ring-2 focus:ring-emerald-500 focus:outline-none cursor-pointer"
-                >
-                  <option value="device_real">🛰️ Sensor GPS Perangkat Asli (Hardware Geolocation)</option>
-                  <option value="office_center">🏢 Titik Pusat Kantor (Jarak 0m • Dalam Radius)</option>
-                  <option value="lobby">🚪 Lobi & Resepsionis (Jarak ~18m • Dalam Radius)</option>
-                  <option value="parking">🅿️ Area Parkir Kantor (Jarak ~38m • Dalam Radius)</option>
-                  <option value="outside_close">🛣️ Luar Radius Dekat (Jarak ~{config.officeRadiusMeters + 35}m • Ditolak)</option>
-                  <option value="outside_far">🏠 Luar Kota / Jarak Jauh (Jarak ~2.8 km • Ditolak)</option>
-                </select>
+                {/* Live Geofence Status Badge */}
+                <div className={`p-2.5 rounded-lg border text-xs font-semibold flex items-center justify-between ${
+                  isInsideRadius
+                    ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                    : 'bg-rose-50 border-rose-300 text-rose-900'
+                }`}>
+                  <div className="flex items-center gap-2">
+                    {isInsideRadius ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    ) : (
+                      <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
+                    )}
+                    <div>
+                      <span className="font-bold">
+                        {isInsideRadius ? 'Status Geofence: DALAM RADIUS' : 'Status Geofence: DI LUAR RADIUS'}
+                      </span>
+                      <div className="text-[11px] opacity-90 font-normal">
+                        {isInsideRadius
+                          ? `Jarak ${formatDistance(distanceToOffice)} ≤ ${targetRadiusMeters}m (Check-In & Check-Out Diizinkan)`
+                          : `Jarak ${formatDistance(distanceToOffice)} > ${targetRadiusMeters}m (Check-In & Check-Out Terkunci)`}
+                      </div>
+                    </div>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
+                    isInsideRadius ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
+                  }`}>
+                    {isInsideRadius ? 'Bisa Presensi' : 'Terkunci'}
+                  </span>
+                </div>
+
+                {/* Primary Hardware Sensor Status */}
+                <div className="p-3 bg-white border border-slate-200 rounded-xl space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
+                      <Compass className="w-4 h-4 text-emerald-600" />
+                      <span>Sensor GPS Perangkat Asli</span>
+                    </div>
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
+                      activeLocationPreset === 'device_real'
+                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                        : 'bg-amber-100 text-amber-800 border border-amber-300'
+                    }`}>
+                      {activeLocationPreset === 'device_real' ? '🛰️ Sensor Asli Aktif' : '⚠️ Mode Simulasi (Absen Terkunci)'}
+                    </span>
+                  </div>
+
+                  <div className="text-[11px] text-slate-600 space-y-1 bg-slate-50 p-2.5 rounded-lg border border-slate-200/80">
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Koordinat Saat Ini:</span>
+                      <span className="font-mono font-bold text-slate-800">
+                        {currentLat.toFixed(6)}, {currentLng.toFixed(6)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Akurasi Sinyal Satelit:</span>
+                      <span className="font-semibold text-emerald-700">
+                        ±{Math.round(gpsAccuracy)} meter ({getGpsAccuracyLevel(gpsAccuracy).label})
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Jarak ke Titik Resmi:</span>
+                      <span className={`font-bold ${isInsideRadius ? 'text-emerald-700' : 'text-rose-700'}`}>
+                        {formatDistance(distanceToOffice)} (Batas: {targetRadiusMeters}m)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleSelectLocationPreset('device_real')}
+                      disabled={isGettingLocation}
+                      className="flex-1 py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer shadow-xs disabled:opacity-60"
+                    >
+                      <Compass className={`w-3.5 h-3.5 ${isGettingLocation ? 'animate-spin' : ''}`} />
+                      <span>{isGettingLocation ? 'Membaca Satelit GPS...' : 'Segarkan Sensor GPS Asli'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowDiagnosticTools(!showDiagnosticTools)}
+                      className="py-2 px-2.5 rounded-lg border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold flex items-center gap-1 transition cursor-pointer"
+                      title="Buka Alat Uji Diagnostik Visual Radar"
+                    >
+                      <Navigation className="w-3.5 h-3.5 text-slate-600" />
+                      <span>{showDiagnosticTools ? 'Tutup Uji' : 'Uji Visual'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Collapsible Diagnostic Simulation Section (Strictly preview only - Attendance Locked) */}
+                {showDiagnosticTools && (
+                  <div className="p-3 bg-amber-50/70 border border-amber-300 rounded-xl space-y-2.5 animate-fadeIn">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="text-xs font-bold text-amber-950 flex items-center gap-1">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                          <span>Simulasi Diagnostik Visual Geofence</span>
+                        </div>
+                        <p className="text-[10px] text-amber-800 mt-0.5">
+                          Hanya untuk menguji respons radar visual. <strong>Presensi (Check-In & Check-Out) otomatis terkunci</strong> saat mode simulasi aktif.
+                        </p>
+                      </div>
+                      {activeLocationPreset !== 'device_real' && (
+                        <button
+                          type="button"
+                          onClick={() => handleSelectLocationPreset('device_real')}
+                          className="px-2 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded text-[10px] font-bold shrink-0 transition"
+                        >
+                          Beralih ke Sensor Asli
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="block text-[10px] font-bold text-amber-900 uppercase tracking-wide">
+                        Pilih Titik Uji Radar (Simulasi Tampilan):
+                      </label>
+                      <select
+                        value={activeLocationPreset}
+                        onChange={(e) => handleSelectLocationPreset(e.target.value)}
+                        className="w-full text-xs bg-white border border-amber-300 rounded-lg px-2.5 py-1.5 text-slate-800 font-medium focus:ring-2 focus:ring-amber-500 focus:outline-none cursor-pointer"
+                      >
+                        <option value="device_real">🛰️ Sensor GPS Perangkat Asli (Hardware Satelit — Valid untuk Absen)</option>
+                        {activeDuty ? (
+                          <>
+                            <option value="outside_duty">⛔ Uji Luar Radius Tugas (+35m • Terkunci ❌)</option>
+                            <option value="outside_far">🚗 Uji Jarak Jauh (~2.5 km • Terkunci ❌)</option>
+                            <option value="outside_city">✈️ Uji Luar Kota (~45 km • Terkunci ❌)</option>
+                            <option value="weak_signal">⚠️ Uji Sinyal Lemah (Akurasi ±120m • Terkunci ❌)</option>
+                          </>
+                        ) : (
+                          <>
+                            <option value="outside_close">⛔ Uji Luar Radius Dekat (+35m • Jarak ~{targetRadiusMeters + 35}m • Terkunci ❌)</option>
+                            <option value="outside_far">🚗 Uji Jarak Jauh / Beda Kelurahan (~2.5 km • Terkunci ❌)</option>
+                            <option value="outside_city">✈️ Uji Luar Kota / Beda Daerah (~45 km • Terkunci ❌)</option>
+                            <option value="weak_signal">⚠️ Uji Sinyal Lemah & Di Luar Radius (Akurasi ±120m • Terkunci ❌)</option>
+                          </>
+                        )}
+                      </select>
+                    </div>
+
+                    {activeLocationPreset !== 'device_real' && (
+                      <div className="p-2 bg-amber-100/90 rounded-lg border border-amber-300 text-[11px] text-amber-950 font-medium flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5">
+                          <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0" />
+                          <span>Mode simulasi aktif: <strong>Tombol presensi terkunci</strong>. Wajib kembalikan ke sensor asli untuk absen.</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleSelectLocationPreset('device_real')}
+                          className="px-2 py-1 bg-amber-800 hover:bg-amber-900 text-white rounded text-[10px] font-bold shrink-0 transition"
+                        >
+                          Kembalikan
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <p className="text-[10px] text-slate-500">
-                  Sistem secara otomatis menghitung rumus geodesi Haversine ke titik pusat kantor ({config.officeRadiusMeters}m).
+                  {activeDuty
+                    ? `Presensi ditugaskan di ${activeDuty.city} (${activeDuty.locationName}). Batas geofence resmi: ${targetRadiusMeters} meter.`
+                    : `Sistem memverifikasi koordinat hardware satelit ke titik kantor (${config.officeRadiusMeters}m). Presensi hanya diproses jika sensor asli berada di dalam radius resmi.`}
                 </p>
               </div>
 
               {/* GPS Geofence Visual Meter */}
               <div className="rounded-xl p-4 bg-slate-900 text-white space-y-3">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-400">Jarak Aktual Anda ke Kantor</span>
+                  <span className="text-slate-400">Jarak ke Titik {activeDuty ? 'Penugasan' : 'Kantor'}</span>
                   <span className={`font-mono font-bold text-sm ${isInsideRadius ? 'text-emerald-400' : 'text-rose-400'}`}>
                     {formatDistance(distanceToOffice)}
                   </span>
@@ -673,28 +1174,36 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
                     className={`h-full transition-all duration-500 ${
                       isInsideRadius ? 'bg-emerald-500' : 'bg-rose-500'
                     }`}
-                    style={{ width: `${Math.min(100, Math.max(8, (distanceToOffice / (config.officeRadiusMeters * 2)) * 100))}%` }}
+                    style={{ width: `${Math.min(100, Math.max(8, (distanceToOffice / (targetRadiusMeters * 2)) * 100))}%` }}
                   />
                 </div>
 
                 <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1">
-                  <span>Batas Geofence: {config.officeRadiusMeters} meter</span>
-                  <span className={isInsideRadius ? 'text-emerald-400' : 'text-rose-400 font-semibold'}>
+                  <span>Batas Geofence: {targetRadiusMeters} meter</span>
+                  <span className={isInsideRadius ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'}>
                     {isInsideRadius 
-                      ? `Sisa toleransi: ${Math.round(config.officeRadiusMeters - distanceToOffice)}m` 
-                      : `Lebih ${Math.round(distanceToOffice - config.officeRadiusMeters)}m di luar batas`}
+                      ? `Sisa toleransi: ${Math.round(targetRadiusMeters - distanceToOffice)}m (Aman)` 
+                      : `Lebih ${Math.round(distanceToOffice - targetRadiusMeters)}m di luar batas (Terkunci)`}
                   </span>
                 </div>
 
-                {/* Office Target & Coordinates */}
+                {/* Target & Coordinates */}
                 <div className="pt-2 border-t border-slate-800 text-[11px] text-slate-300 space-y-1">
                   <div className="flex justify-between">
-                    <span className="text-slate-400">Koordinat Kantor:</span>
-                    <span className="font-mono text-slate-200">{config.officeLat.toFixed(5)}, {config.officeLng.toFixed(5)}</span>
+                    <span className="text-slate-400">Titik Target:</span>
+                    <span className="text-slate-200 font-semibold truncate max-w-[210px]" title={targetLocationTitle}>
+                      {activeDuty ? `${activeDuty.city} (${activeDuty.locationName})` : config.companyName}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Koordinat Target:</span>
+                    <span className="font-mono text-slate-200">{targetLat.toFixed(5)}, {targetLng.toFixed(5)}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-400">Koordinat Anda:</span>
-                    <span className="font-mono text-emerald-400">{currentLat.toFixed(5)}, {currentLng.toFixed(5)}</span>
+                    <span className={`font-mono ${isInsideRadius ? 'text-emerald-400' : 'text-rose-400 font-bold'}`}>
+                      {currentLat.toFixed(5)}, {currentLng.toFixed(5)}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -768,26 +1277,85 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
               </div>
 
               {/* Check-In / Check-Out Actions */}
-              <div className="pt-2">
+              <div className="pt-2 space-y-2.5">
+                {isVerifyingBeforeAction && (
+                  <div className="p-3.5 rounded-xl bg-amber-50 border-2 border-amber-300 text-amber-950 text-xs flex items-center gap-3 animate-pulse">
+                    <Navigation className="w-5 h-5 text-amber-600 animate-spin shrink-0" />
+                    <div>
+                      <div className="font-bold">Memeriksa & Mengunci Lokasi GPS Otomatis...</div>
+                      <div className="text-[11px] text-amber-800">
+                        Mengambil koordinat satelit presisi sebelum {isVerifyingBeforeAction === 'checkin' ? 'Check-In' : 'Check-Out'} diproses.
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Warning message if simulation mode is active */}
+                {activeLocationPreset !== 'device_real' && (
+                  <div className="p-3.5 rounded-xl bg-amber-50 border-2 border-amber-300 text-amber-950 text-xs space-y-2 shadow-2xs">
+                    <div className="font-extrabold flex items-center gap-2 text-amber-800">
+                      <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>Presensi Terkunci: Mode Simulasi Radar Aktif</span>
+                    </div>
+                    <p className="text-[11px] text-amber-800 leading-relaxed">
+                      Anda sedang memilih titik simulasi tampilan. Sesuai SOP keamanan, <strong>presensi dilarang menggunakan simulasi</strong> dan wajib menggunakan <strong>Sensor GPS Asli</strong> perangkat fisik Anda.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectLocationPreset('device_real')}
+                      className="w-full py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition cursor-pointer"
+                    >
+                      <Compass className="w-4 h-4" />
+                      <span>Beralih ke Sensor GPS Asli Sekarang</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* Warning message if outside radius */}
+                {activeLocationPreset === 'device_real' && !isInsideRadius && (
+                  <div className="p-3.5 rounded-xl bg-rose-50 border-2 border-rose-300 text-rose-950 text-xs space-y-1.5 shadow-2xs">
+                    <div className="font-extrabold flex items-center gap-2 text-rose-800">
+                      <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
+                      <span>Presensi Terkunci: Di Luar Radius Geofence ({formatDistance(distanceToOffice)})</span>
+                    </div>
+                    <p className="text-[11px] text-rose-700 leading-relaxed">
+                      Jarak sensor GPS Anda saat ini <strong>{formatDistance(distanceToOffice)}</strong> dari titik {activeDuty ? 'penugasan' : 'kantor'} (batas maksimal <strong>{targetRadiusMeters}m</strong>, selisih <strong>+{formatDistance(distanceToOffice - targetRadiusMeters)}</strong>). Sesuai aturan akurat geofence, <strong>Check-In dan Check-Out tidak dapat diproses</strong> hingga Anda berada di dalam radius resmi.
+                    </p>
+                  </div>
+                )}
+
                 {!todayRecord ? (
                   <button
                     type="button"
                     onClick={handlePerformCheckIn}
-                    className={`w-full py-3 px-4 rounded-xl font-bold text-sm text-white transition flex items-center justify-center gap-2 shadow-md cursor-pointer ${
-                      isInsideRadius
+                    disabled={isGettingLocation || activeLocationPreset !== 'device_real'}
+                    className={`w-full py-3.5 px-4 rounded-xl font-bold text-sm text-white transition flex items-center justify-center gap-2 shadow-md cursor-pointer ${
+                      activeLocationPreset !== 'device_real'
+                        ? 'bg-slate-400 cursor-not-allowed opacity-80'
+                        : isInsideRadius
                         ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-700/25'
-                        : 'bg-rose-600 hover:bg-rose-700 shadow-rose-700/25'
-                    }`}
+                        : 'bg-rose-600 hover:bg-rose-700 shadow-rose-700/25 border border-rose-700'
+                    } ${isGettingLocation ? 'opacity-70 cursor-wait' : ''}`}
                   >
-                    {isInsideRadius ? (
+                    {isGettingLocation ? (
+                      <>
+                        <Navigation className="w-5 h-5 animate-spin" />
+                        <span>Memverifikasi Sinyal GPS Satelit...</span>
+                      </>
+                    ) : activeLocationPreset !== 'device_real' ? (
+                      <>
+                        <ShieldAlert className="w-5 h-5 text-amber-200" />
+                        <span>Presensi Terkunci (Mode Simulasi Aktif — Gunakan Sensor Asli)</span>
+                      </>
+                    ) : isInsideRadius ? (
                       <>
                         <CheckCircle className="w-5 h-5" />
                         <span>Check-In Sekarang ({currentTime.toLocaleTimeString('id-ID').slice(0, 5)} WIB)</span>
                       </>
                     ) : (
                       <>
-                        <AlertTriangle className="w-5 h-5" />
-                        <span>Di Luar Radius Kantor ({formatDistance(distanceToOffice)}) - Verifikasi</span>
+                        <ShieldAlert className="w-5 h-5 text-rose-200" />
+                        <span>Check-In Terkunci: Di Luar Radius ({formatDistance(distanceToOffice)}) — Ditolak</span>
                       </>
                     )}
                   </button>
@@ -806,10 +1374,36 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
                     <button
                       type="button"
                       onClick={handlePerformCheckOut}
-                      className="w-full py-3 px-4 rounded-xl font-bold text-sm bg-indigo-600 hover:bg-indigo-700 text-white transition flex items-center justify-center gap-2 shadow-md shadow-indigo-700/25"
+                      disabled={isGettingLocation || activeLocationPreset !== 'device_real'}
+                      className={`w-full py-3.5 px-4 rounded-xl font-bold text-sm text-white transition flex items-center justify-center gap-2 shadow-md cursor-pointer ${
+                        activeLocationPreset !== 'device_real'
+                          ? 'bg-slate-400 cursor-not-allowed opacity-80'
+                          : isInsideRadius
+                          ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-700/25'
+                          : 'bg-rose-600 hover:bg-rose-700 shadow-rose-700/25 border border-rose-700'
+                      } ${isGettingLocation ? 'opacity-70 cursor-wait' : ''}`}
                     >
-                      <Clock className="w-5 h-5" />
-                      <span>Check-Out Pulang ({currentTime.toLocaleTimeString('id-ID').slice(0, 5)})</span>
+                      {isGettingLocation ? (
+                        <>
+                          <Navigation className="w-5 h-5 animate-spin" />
+                          <span>Memverifikasi GPS Check-Out...</span>
+                        </>
+                      ) : activeLocationPreset !== 'device_real' ? (
+                        <>
+                          <ShieldAlert className="w-5 h-5 text-amber-200" />
+                          <span>Check-Out Terkunci (Mode Simulasi Aktif — Gunakan Sensor Asli)</span>
+                        </>
+                      ) : isInsideRadius ? (
+                        <>
+                          <Clock className="w-5 h-5" />
+                          <span>Check-Out Pulang ({currentTime.toLocaleTimeString('id-ID').slice(0, 5)} WIB)</span>
+                        </>
+                      ) : (
+                        <>
+                          <ShieldAlert className="w-5 h-5 text-rose-200" />
+                          <span>Check-Out Terkunci: Di Luar Radius ({formatDistance(distanceToOffice)}) — Ditolak</span>
+                        </>
+                      )}
                     </button>
                   </div>
                 ) : (
@@ -845,19 +1439,51 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => exportSingleEmployeeSlipPDF(employee, payrollSummary, attendanceRecords, config)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-white text-emerald-900 hover:bg-emerald-50 shadow-sm transition shrink-0"
-              >
-                <Download className="w-3.5 h-3.5 text-emerald-700" />
-                Unduh Slip Gaji (PDF)
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-1.5 bg-emerald-950/40 border border-emerald-500/40 rounded-lg px-2 py-1">
+                  <span className="text-[10px] text-emerald-200 font-semibold uppercase tracking-wider">Template Slip:</span>
+                  <select
+                    value={selectedSlipTemplate}
+                    onChange={(e) => setSelectedSlipTemplate(e.target.value as PayslipTemplateId)}
+                    className="bg-emerald-900 text-white text-xs font-bold rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-300 cursor-pointer border-0"
+                  >
+                    {PAYSLIP_TEMPLATES.map((tmpl) => (
+                      <option key={tmpl.id} value={tmpl.id} className="bg-slate-900 text-white">
+                        {tmpl.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => exportSingleEmployeeSlipPDF(employee, payrollSummary, attendanceRecords, config, selectedSlipTemplate)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-white text-emerald-900 hover:bg-emerald-50 shadow-sm transition shrink-0 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5 text-emerald-700" />
+                  Unduh Slip Gaji (PDF)
+                </button>
+              </div>
             </div>
 
             <div className="p-6 space-y-6">
               {/* Big Take Home Pay Estimate Card */}
-              <div className="rounded-2xl p-5 bg-gradient-to-br from-slate-900 to-slate-800 text-white shadow-lg">
+              <div className="rounded-2xl p-5 bg-gradient-to-br from-slate-900 to-slate-800 text-white shadow-lg space-y-3">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                    employee.salaryType === 'daily'
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                      : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                  }`}>
+                    {employee.salaryType === 'daily' ? '⚡ Skema: Upah Harian (Sesuai Presensi)' : '🏢 Skema: Gaji Pokok Bulanan'}
+                  </span>
+                  {employee.salaryType === 'daily' && (
+                    <span className="text-xs text-emerald-300 font-mono font-bold">
+                      Rate: {formatIDR(employee.dailyRate || employee.baseSalary)} / hari
+                    </span>
+                  )}
+                </div>
+
                 <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
                   <span>ESTIMASI TAKE HOME PAY BULAN INI</span>
                   <span className="text-emerald-400 font-medium">Transparan & Real-Time</span>
@@ -865,9 +1491,69 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
                 <div className="text-3xl sm:text-4xl font-extrabold tracking-tight text-white font-mono">
                   {formatIDR(payrollSummary.netSalary)}
                 </div>
-                <div className="mt-3 pt-3 border-t border-slate-800 text-xs text-slate-300 flex flex-wrap items-center justify-between gap-2">
+                <div className="pt-3 border-t border-slate-800 text-xs text-slate-300 flex flex-wrap items-center justify-between gap-2">
                   <span>{cycleInfo.cutoffDateText}</span>
                   <span className="text-emerald-400 font-semibold">Tgl Gajian: {config.payrollDateDay} Setiap Bulan</span>
+                </div>
+              </div>
+
+              {/* Estimasi Gaji Sesuai Absensi Hari Ini */}
+              <div className="rounded-2xl p-4 sm:p-5 border-2 border-emerald-500/30 bg-gradient-to-br from-emerald-950/40 via-slate-900 to-slate-900 text-white shadow-md space-y-3">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <DollarSign className="w-5 h-5 text-emerald-400 shrink-0" />
+                    <div>
+                      <h4 className="font-bold text-sm text-white">Estimasi Gaji Sesuai Absensi Hari Ini</h4>
+                      <p className="text-[11px] text-slate-300">
+                        Tanggal: {todayStr} • Dihitung otomatis dari catatan kehadiran Anda
+                      </p>
+                    </div>
+                  </div>
+                  <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${
+                    todayRecord?.checkOutTime
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                      : todayRecord
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse'
+                      : 'bg-slate-800 text-slate-400 border border-slate-700'
+                  }`}>
+                    {payrollSummary.todayBreakdown?.status || 'Belum Presensi'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 font-mono text-xs">
+                  <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60">
+                    <span className="text-[10px] text-slate-400 block font-sans">
+                      {employee.salaryType === 'daily' ? 'Upah Pokok Harian' : 'Prorata Hari Ini (1/25)'}
+                    </span>
+                    <span className="font-bold text-emerald-400 text-sm">
+                      {formatIDR(payrollSummary.todayBreakdown?.baseRate || 0)}
+                    </span>
+                  </div>
+                  <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60">
+                    <span className="text-[10px] text-slate-400 block font-sans">Uang Makan / Transport</span>
+                    <span className="font-bold text-emerald-400 text-sm">
+                      +{formatIDR(payrollSummary.todayBreakdown?.transport || 0)}
+                    </span>
+                  </div>
+                  <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60">
+                    <span className="text-[10px] text-slate-400 block font-sans">Upah Lembur Hari Ini</span>
+                    <span className="font-bold text-indigo-400 text-sm">
+                      +{formatIDR(payrollSummary.todayBreakdown?.overtime || 0)}
+                    </span>
+                  </div>
+                  <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700/60">
+                    <span className="text-[10px] text-slate-400 block font-sans">Potongan Keterlambatan</span>
+                    <span className="font-bold text-rose-400 text-sm">
+                      -{formatIDR(payrollSummary.todayBreakdown?.lateDeduction || 0)}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-slate-800 flex items-center justify-between flex-wrap gap-2">
+                  <span className="text-xs text-slate-300 font-medium">Total Estimasi Penghasilan Hari Ini:</span>
+                  <span className="text-lg font-extrabold text-emerald-400 font-mono">
+                    {formatIDR(payrollSummary.todayEstimatedSalary || 0)}
+                  </span>
                 </div>
               </div>
 
@@ -878,16 +1564,33 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
                 </h3>
 
                 <div className="rounded-xl border border-slate-200 overflow-hidden divide-y divide-slate-100 text-xs">
-                  {/* Gaji Pokok */}
-                  <div className="p-3 flex items-center justify-between hover:bg-slate-50 transition">
-                    <div>
-                      <div className="font-semibold text-slate-900">Gaji Pokok (Monthly Base)</div>
-                      <div className="text-[11px] text-slate-500">Sesuai kontrak kerja dan jabatan</div>
+                  {/* Gaji Pokok (Harian atau Bulanan) */}
+                  {employee.salaryType === 'daily' ? (
+                    <div className="p-3 flex items-center justify-between bg-emerald-50/40 hover:bg-emerald-50 transition">
+                      <div>
+                        <div className="font-semibold text-slate-900 flex items-center gap-1.5">
+                          <DollarSign className="w-4 h-4 text-emerald-600" />
+                          Gaji Pokok Harian ({payrollSummary.attendanceDays} Hari Hadir × {formatIDR(employee.dailyRate || employee.baseSalary)})
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          Upah pokok harian diakumulasikan dari kehadiran terverifikasi GPS
+                        </div>
+                      </div>
+                      <div className="font-bold text-emerald-700 font-mono text-sm">
+                        {formatIDR(payrollSummary.dailyBaseEarnings || 0)}
+                      </div>
                     </div>
-                    <div className="font-bold text-slate-800 font-mono text-sm">
-                      {formatIDR(payrollSummary.baseSalary)}
+                  ) : (
+                    <div className="p-3 flex items-center justify-between hover:bg-slate-50 transition">
+                      <div>
+                        <div className="font-semibold text-slate-900">Gaji Pokok Bulanan (Monthly Base)</div>
+                        <div className="text-[11px] text-slate-500">Sesuai kontrak kerja dan jabatan</div>
+                      </div>
+                      <div className="font-bold text-slate-800 font-mono text-sm">
+                        {formatIDR(payrollSummary.baseSalary)}
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   {/* Tunjangan Tetap */}
                   <div className="p-3 flex items-center justify-between hover:bg-slate-50 transition">
@@ -1433,7 +2136,7 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
               </div>
               <div>
                 <h3 className="font-bold text-base text-rose-950">Validasi Geofence Gagal: Di Luar Radius</h3>
-                <p className="text-xs text-rose-700">Presensi tidak dapat diproses di luar jangkauan kantor resmi</p>
+                <p className="text-xs text-rose-700">Presensi Masuk maupun Pulang Ditolak Sistem</p>
               </div>
             </div>
 
@@ -1441,7 +2144,13 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
             <div className="p-6 space-y-4 text-xs">
               <div className="p-4 bg-slate-900 text-white rounded-xl space-y-3">
                 <div className="flex justify-between items-center text-xs">
-                  <span className="text-slate-400">Jarak Terdeteksi ke Kantor:</span>
+                  <span className="text-slate-400">Titik Target Sah:</span>
+                  <span className="font-bold text-slate-100 text-right truncate max-w-[240px]">
+                    {activeDuty ? `${activeDuty.city} (${activeDuty.locationName})` : config.companyName}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-slate-400">Jarak Terdeteksi ke Lokasi:</span>
                   <span className="font-mono font-bold text-rose-400 text-sm">
                     {formatDistance(radiusAlertData.distance)}
                   </span>
@@ -1469,15 +2178,15 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
               <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 space-y-1.5">
                 <div className="font-bold flex items-center gap-1.5 text-amber-950">
                   <Info className="w-4 h-4 text-amber-600 shrink-0" />
-                  Ketentuan Presensi Berbasis Lokasi Akurat:
+                  Sistem Anti-Celah Presensi (Zero-Bypass Geofencing):
                 </div>
                 <p className="text-[11px] text-amber-800 leading-relaxed">
-                  Sistem mewajibkan presensi fisik tepat di area kantor ({config.officeRadiusMeters}m dari titik pusat). Hal ini untuk memastikan integritas jam kerja dan validitas kalkulasi insentif transport harian.
+                  Sistem secara ketat mengunci proses <strong>Check-In</strong> dan <strong>Check-Out</strong>. Karyawan <strong>wajib hadir secara fisik</strong> di area kantor ({config.officeRadiusMeters}m) atau di titik lokasi tugas resmi ({radiusAlertData.allowedRadius}m) yang telah ditugaskan admin. Presensi tidak dapat diproses jika berada di luar jangkauan.
                 </p>
               </div>
 
               <p className="text-slate-500 text-[11px]">
-                Jika Anda sudah berada di kantor namun GPS meleset, pastikan Anda berada di area terbuka atau dekat jendela dan klik tombol <strong>Segarkan GPS</strong> di bawah.
+                Jika Anda sudah tiba di lokasi namun sinyal GPS perangkat belum stabil, pastikan izin lokasi aktif pada peramban/browser, cari area terbuka atau klik <strong>Segarkan GPS Ulang</strong>.
               </p>
             </div>
 
