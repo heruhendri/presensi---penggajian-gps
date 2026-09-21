@@ -16,7 +16,8 @@ import {
   ShieldCheck,
   Check,
   X,
-  Compass
+  Compass,
+  Camera
 } from 'lucide-react';
 import { AttendanceRecord, CompanyConfig, Employee } from '../types';
 import { formatDistance } from '../utils/geo';
@@ -275,18 +276,26 @@ export const AttendanceApprovalSection: React.FC<AttendanceApprovalSectionProps>
                 </div>
 
                 {/* Photo attachment preview if any */}
-                {record.remoteAttachmentPhoto && (
+                {(record.verificationPhoto || record.remoteAttachmentPhoto) && (
                   <div className="space-y-1">
-                    <span className="text-[11px] font-semibold text-slate-700 block">Lampiran Bukti Lapangan / Foto:</span>
+                    <span className="text-[11px] font-semibold text-slate-700 block flex items-center gap-1.5">
+                      <Camera className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>{record.verificationPhoto ? 'Foto Verifikasi Presensi (Stempel GPS Resmi):' : 'Lampiran Bukti Lapangan / Foto:'}</span>
+                    </span>
                     <div 
-                      onClick={() => setPreviewPhotoUrl(record.remoteAttachmentPhoto || null)}
-                      className="cursor-pointer rounded-xl border border-slate-200 overflow-hidden max-h-36 bg-slate-950 flex items-center justify-center hover:opacity-95 transition"
+                      onClick={() => setPreviewPhotoUrl((record.verificationPhoto || record.remoteAttachmentPhoto) || null)}
+                      className="cursor-pointer rounded-xl border border-emerald-500/40 overflow-hidden max-h-40 bg-slate-950 flex items-center justify-center hover:opacity-95 transition relative group"
                     >
                       <img 
-                        src={record.remoteAttachmentPhoto} 
-                        alt="Bukti Dinas" 
-                        className="max-h-36 object-contain"
+                        src={record.verificationPhoto || record.remoteAttachmentPhoto} 
+                        alt="Bukti Presensi Geotag" 
+                        className="max-h-40 object-contain"
                       />
+                      <div className="absolute inset-0 bg-slate-950/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                        <span className="px-3 py-1 rounded-lg bg-white/90 text-slate-900 text-xs font-bold">
+                          Klik untuk Perbesar
+                        </span>
+                      </div>
                     </div>
                   </div>
                 )}

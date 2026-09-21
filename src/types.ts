@@ -59,6 +59,7 @@ export interface AttendanceRecord {
   overtimePay: number;
   isOvertimeApproved: boolean;
   notes?: string;
+  verificationPhoto?: string; // Base64 data URL selfie with GPS coordinates watermark
   // Out-of-radius / Out-of-island / Remote attendance attributes
   isRemoteOrOutIsland?: boolean;
   remoteReasonType?: 'dinas_luar_kota' | 'luar_pulau' | 'kunjungan_klien' | 'wfh_remote' | 'proyek_lapangan' | 'lainnya';
@@ -148,6 +149,43 @@ export interface CompanyConfig {
   // Admin security credentials
   adminUsername?: string;
   adminPassword?: string;
+
+  // Telegram Bot integration for automated daily backups
+  telegramBotToken?: string;
+  telegramChatId?: string;
+  telegramTopicId?: string; // Optional thread/topic ID for Telegram supergroup forum
+  telegramAutoDailyBackup?: boolean;
+  telegramDailyBackupTime?: string; // e.g. '23:00'
+  lastTelegramBackupDate?: string; // e.g. '2026-09-21'
+  lastTelegramBackupTime?: string; // e.g. '21 Sep 2026, 23:00:15'
+  lastTelegramBackupStatus?: 'success' | 'failed';
+  lastTelegramBackupMessage?: string;
+}
+
+export interface SystemBackupData {
+  version: string;
+  exportedAt: string;
+  exportTimestampReadable: string;
+  timestamp?: string; // alias for display
+  systemName: string;
+  companyName: string;
+  appName?: string;
+  summary: {
+    totalEmployees: number;
+    totalAttendances: number;
+    totalWorkReports: number;
+    totalAssignments: number;
+    totalShifts: number;
+    totalNotifications?: number;
+  };
+  config: CompanyConfig;
+  employees: Employee[];
+  shifts: Shift[];
+  attendanceRecords: AttendanceRecord[];
+  workReports: WorkReport[];
+  assignments: TemporaryLocationAssignment[];
+  notifications?: PushNotification[];
+  emailLogs?: EmailLog[];
 }
 
 export interface PushNotification {

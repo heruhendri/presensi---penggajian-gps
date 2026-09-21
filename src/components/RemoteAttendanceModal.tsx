@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { Employee, CompanyConfig } from '../types';
 import { formatDistance } from '../utils/geo';
+import { drawGpsWatermark } from '../utils/cameraWatermark';
 
 interface RemoteAttendanceModalProps {
   isOpen: boolean;
@@ -57,8 +58,30 @@ export const RemoteAttendanceModal: React.FC<RemoteAttendanceModalProps> = ({
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
-      reader.onloadend = () => {
-        setPhotoPreview(reader.result as string);
+      reader.onload = (ev) => {
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const watermarked = drawGpsWatermark(img, {
+              lat: currentLat,
+              lng: currentLng,
+              accuracy: accuracy,
+              distanceToOffice: distanceToOffice,
+              officeRadius: config.geofenceRadiusMeters,
+              employeeName: employee.name,
+              employeeId: employee.id,
+              department: employee.department,
+              companyName: config.companyName,
+              appName: config.appName,
+              statusLabel: isOutOfIsland ? 'PENUGASAN LUAR PULAU' : 'PENUGASAN LUAR RADIUS',
+            });
+            setPhotoPreview(watermarked);
+          } catch (err) {
+            console.error('Failed to watermark remote photo:', err);
+            setPhotoPreview(ev.target?.result as string);
+          }
+        };
+        img.src = ev.target?.result as string;
       };
       reader.readAsDataURL(file);
     }

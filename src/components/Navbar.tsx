@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Building2, 
   MapPin, 
@@ -13,7 +13,9 @@ import {
   Menu,
   X,
   KeyRound,
-  Lock
+  Lock,
+  Bot,
+  Trash2
 } from 'lucide-react';
 import { CompanyConfig, Employee, PushNotification, UserRole } from '../types';
 
@@ -29,6 +31,9 @@ interface NavbarProps {
   onOpenSpreadsheetModal: () => void;
   onOpenChangePassword?: () => void;
   onOpenCompanyProfile?: () => void;
+  onOpenBackupModal?: () => void;
+  onOpenClearModal?: () => void;
+  onOpenSecureSessionModal?: () => void;
   onSwitchUser: () => void;
   onLogout: () => void;
   isSyncingSheets: boolean;
@@ -46,12 +51,35 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenSpreadsheetModal,
   onOpenChangePassword,
   onOpenCompanyProfile,
+  onOpenBackupModal,
+  onOpenClearModal,
+  onOpenSecureSessionModal,
   onSwitchUser,
   onLogout,
   isSyncingSheets,
   onManualSyncSheets,
 }) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [hasSecureSession, setHasSecureSession] = useState(false);
+  const [remainingDays, setRemainingDays] = useState(0);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('app_auth_session_30d_secure');
+      if (raw) {
+        setHasSecureSession(true);
+        const parsed = JSON.parse(raw);
+        if (parsed?.expiresAt) {
+          const days = Math.max(0, Math.ceil((parsed.expiresAt - Date.now()) / (24 * 60 * 60 * 1000)));
+          setRemainingDays(days);
+        }
+      } else {
+        setHasSecureSession(false);
+      }
+    } catch {
+      setHasSecureSession(false);
+    }
+  }, [role]);
 
   return (
     <header className="sticky top-0 z-40 bg-slate-900 text-white border-b border-slate-800 shadow-sm backdrop-blur-md bg-slate-900/95">
@@ -177,6 +205,33 @@ export const Navbar: React.FC<NavbarProps> = ({
               </div>
             </div>
 
+            {/* Admin Backup & Telegram Button (Desktop) */}
+            {role === 'admin' && onOpenBackupModal && (
+              <button
+                onClick={onOpenBackupModal}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-sky-950/80 hover:bg-sky-900 text-sky-200 border border-sky-700/60 transition cursor-pointer"
+                title="Cadangan Database & Kirim ke Bot Telegram"
+              >
+                <Bot className="w-3.5 h-3.5 text-sky-400" />
+                <span className="hidden xl:inline">Backup & Telegram</span>
+                {config.lastTelegramBackupStatus === 'success' && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" title="Cadangan aktif" />
+                )}
+              </button>
+            )}
+
+            {/* Admin Clear Data Button (Desktop) */}
+            {role === 'admin' && onOpenClearModal && (
+              <button
+                onClick={onOpenClearModal}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-rose-950/70 hover:bg-rose-900 text-rose-200 border border-rose-700/60 transition cursor-pointer"
+                title="Bersihkan Data untuk Mulai Baru Profesional"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                <span className="hidden xl:inline">Bersihkan Data</span>
+              </button>
+            )}
+
             {/* Admin Profile & App Name (Desktop) */}
             {role === 'admin' && onOpenCompanyProfile && (
               <button
@@ -198,6 +253,22 @@ export const Navbar: React.FC<NavbarProps> = ({
               >
                 <KeyRound className="w-3.5 h-3.5 text-indigo-400" />
                 <span className="hidden lg:inline">Ganti Password</span>
+              </button>
+            )}
+
+            {/* 30-Day Protected Session Status Pill */}
+            {hasSecureSession && onOpenSecureSessionModal && (
+              <button
+                type="button"
+                onClick={onOpenSecureSessionModal}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 transition cursor-pointer shadow-sm"
+                title="Sesi 30 Hari Terenkripsi SHA-256 & Terikat Perangkat - Klik untuk detail keamanan"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="hidden xl:inline">Sesi 30H Aman</span>
+                <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded font-mono font-bold">
+                  {remainingDays}h
+                </span>
               </button>
             )}
 
@@ -338,6 +409,32 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* Account Actions */}
           <div className="pt-2 border-t border-slate-800/80 space-y-2">
+            {role === 'admin' && onOpenBackupModal && (
+              <button
+                onClick={() => {
+                  onOpenBackupModal();
+                  setIsMobileMenuOpen(false);
+                }}
+                className="w-full py-2.5 px-3 rounded-xl bg-sky-950/80 hover:bg-sky-900 text-sky-200 font-semibold text-xs border border-sky-700/60 flex items-center justify-center gap-1.5 transition cursor-pointer"
+              >
+                <Bot className="w-3.5 h-3.5 text-sky-400" />
+                <span>Backup & Telegram Bot</span>
+              </button>
+            )}
+
+            {role === 'admin' && onOpenClearModal && (
+              <button
+                onClick={() => {
+                  onOpenClearModal();
+                  setIsMobileMenuOpen(false);
+                }}
+                className="w-full py-2.5 px-3 rounded-xl bg-rose-950/70 hover:bg-rose-900 text-rose-200 font-semibold text-xs border border-rose-700/60 flex items-center justify-center gap-1.5 transition cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                <span>Bersihkan Data (Mulai Baru)</span>
+              </button>
+            )}
+
             {role === 'admin' && onOpenCompanyProfile && (
               <button
                 onClick={() => {
@@ -348,6 +445,19 @@ export const Navbar: React.FC<NavbarProps> = ({
               >
                 <Building2 className="w-3.5 h-3.5 text-indigo-400" />
                 <span>Ubah Profil Perusahaan & Nama App</span>
+              </button>
+            )}
+
+            {hasSecureSession && onOpenSecureSessionModal && (
+              <button
+                onClick={() => {
+                  onOpenSecureSessionModal();
+                  setIsMobileMenuOpen(false);
+                }}
+                className="w-full py-2.5 px-3 rounded-xl bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 font-semibold text-xs border border-emerald-700/60 flex items-center justify-center gap-1.5 transition cursor-pointer"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Status Keamanan Sesi 30 Hari ({remainingDays} hari tersisa)</span>
               </button>
             )}
 

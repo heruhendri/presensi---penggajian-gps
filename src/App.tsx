@@ -9,7 +9,8 @@ import {
   Shift,
   PayrollSummary,
   WorkReport,
-  TemporaryLocationAssignment
+  TemporaryLocationAssignment,
+  SystemBackupData
 } from './types';
 import { 
   INITIAL_CONFIG, 
@@ -28,19 +29,56 @@ import { NotificationCenter } from './components/NotificationCenter';
 import { EmailLogModal } from './components/EmailLogModal';
 import { SpreadsheetSyncModal } from './components/SpreadsheetSyncModal';
 import { ChangeAdminPasswordModal } from './components/ChangeAdminPasswordModal';
+import { ClearDataModal } from './components/ClearDataModal';
+import { BackupRestoreModal } from './components/BackupRestoreModal';
 import { computeEmployeePayroll } from './utils/payroll';
 import { syncToSpreadsheetWebhook } from './utils/sheetsSync';
 import { createEmailAlert } from './utils/emailNotifier';
 import { sanitizeUniqueEmployees } from './utils/employeeUtils';
-import { CheckCircle2, Shield, User, AlertTriangle, LogIn, Lock, Sparkles } from 'lucide-react';
+import { 
+  generateSystemBackupData, 
+  sendTelegramBackupDocument, 
+  formatIndonesianDateTime 
+} from './utils/telegramBackup';
+import { CheckCircle2, Shield, User, AlertTriangle, LogIn, Lock, Sparkles, ShieldCheck } from 'lucide-react';
+import { SecureSessionModal } from './components/SecureSessionModal';
+import { 
+  validateSecureSession, 
+  storeSecure30DaySession, 
+  terminateSecure30DaySession, 
+  touchSecureSessionActivity 
+} from './utils/secureSession';
+
+const getInitialAuthSession = (): { role: UserRole | null; employee: Employee | null } => {
+  try {
+    const savedEmployees = localStorage.getItem('app_employees');
+    const rawList = savedEmployees ? JSON.parse(savedEmployees) : INITIAL_EMPLOYEES;
+    const { employees: cleaned } = sanitizeUniqueEmployees(rawList);
+    const adminPass = localStorage.getItem('app_admin_password') || 'admin123';
+
+    // Multi-layer security validation (expiration, idle-timeout, device fingerprint, SHA-256 signature, password-hash)
+    const result = validateSecureSession({
+      employees: cleaned,
+      expectedAdminPassword: adminPass,
+    });
+    if (result.isValid && result.role) {
+      return { role: result.role, employee: result.employee || null };
+    }
+  } catch (err) {
+    console.warn('Gagal memulihkan sesi aman 30 hari:', err);
+  }
+  return { role: null, employee: null };
+};
 
 export default function App() {
-  // Strictly NO auto-login: Always start unauthenticated upon opening or reloading the application
-  const [role, setRole] = useState<UserRole | null>(null);
-  const [currentEmployee, setCurrentEmployee] = useState<Employee | null>(null);
-  const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(true);
+  // Restore authentication if remembered for 30 days with device & cryptographic verification
+  const [initialSession] = useState<{ role: UserRole | null; employee: Employee | null }>(getInitialAuthSession);
+  const [role, setRole] = useState<UserRole | null>(initialSession.role);
+  const [currentEmployee, setCurrentEmployee] = useState<Employee | null>(initialSession.employee);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(!initialSession.role);
 
   const [isChangePasswordModalOpen, setIsChangePasswordModalOpen] = useState<boolean>(false);
+  const [isSecureSessionModalOpen, setIsSecureSessionModalOpen] = useState<boolean>(false);
 
   const [config, setConfig] = useState<CompanyConfig>(() => {
     const saved = localStorage.getItem('app_company_config');
@@ -124,10 +162,12 @@ export default function App() {
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [isEmailLogOpen, setIsEmailLogOpen] = useState(false);
   const [isSpreadsheetModalOpen, setIsSpreadsheetModalOpen] = useState(false);
+  const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
+  const [isClearModalOpen, setIsClearModalOpen] = useState(false);
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [adminActiveTab, setAdminActiveTab] = useState<
-    'live-employees' | 'attendance-maps' | 'attendance' | 'attendance-charts' | 'payroll' | 'holiday-overtime' | 'rules' | 'company-profile' | 'sheets' | 'reports' | 'employees' | 'work-reports'
+    'live-employees' | 'attendance-maps' | 'attendance' | 'attendance-charts' | 'payroll' | 'holiday-overtime' | 'rules' | 'company-profile' | 'sheets' | 'reports' | 'employees' | 'work-reports' | 'backup-restore'
   >('live-employees');
 
   // Persistence to localStorage
@@ -164,6 +204,259 @@ export default function App() {
     setTimeout(() => {
       setToastMessage(null);
     }, 4000);
+  };
+
+  // Compute current system backup data snapshot
+  const currentBackupData: SystemBackupData = generateSystemBackupData({
+    config,
+    employees,
+    shifts,
+    attendanceRecords,
+    workReports,
+    assignments,
+    notifications,
+    emailLogs,
+  });
+
+  // Automated Daily Backup Check & Transmission to Telegram Bot
+  useEffect(() => {
+    const checkAndExecuteDailyTelegramBackup = async () => {
+      // Must be enabled and have valid credentials
+      const isAutoEnabled = config.telegramAutoDailyBackup ?? true;
+      if (!isAutoEnabled) return;
+      if (!config.telegramBotToken || !config.telegramChatId) return;
+
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const targetTime = config.telegramDailyBackupTime || '23:00';
+      const [targetHour, targetMinute] = targetTime.split(':').map(Number);
+
+      const now = new Date();
+      const currentHour = now.getHours();
+      const currentMinute = now.getMinutes();
+
+      // Check if already backed up today
+      const alreadyBackedUpToday = config.lastTelegramDailyBackupDate === todayStr;
+
+      // Has target scheduled time arrived?
+      const isTimeReached = currentHour > targetHour || (currentHour === targetHour && currentMinute >= (targetMinute || 0));
+
+      if (!alreadyBackedUpToday && isTimeReached) {
+        console.log('[Auto Daily Backup] Executing scheduled backup to Telegram...');
+        const backupSnapshot = generateSystemBackupData({
+          config,
+          employees,
+          shifts,
+          attendanceRecords,
+          workReports,
+          assignments,
+          notifications,
+          emailLogs,
+        });
+
+        const result = await sendTelegramBackupDocument(config, backupSnapshot);
+        if (result.success) {
+          const updatedConfig: CompanyConfig = {
+            ...config,
+            lastTelegramBackupTime: formatIndonesianDateTime(new Date()),
+            lastTelegramBackupStatus: 'success',
+            lastTelegramBackupMessage: 'Cadangan otomatis harian sukses terkirim ke Telegram',
+            lastTelegramDailyBackupDate: todayStr,
+          };
+          setConfig(updatedConfig);
+          localStorage.setItem('app_company_config', JSON.stringify(updatedConfig));
+
+          handleSendPushNotification(
+            'Cadangan Harian Telegram Terkirim',
+            `Dokumen cadangan basis data otomatis telah berhasil dikirim ke bot Telegram Anda (${todayStr}).`,
+            'info'
+          );
+        } else {
+          console.warn('[Auto Daily Backup] Failed to send Telegram backup:', result.error);
+        }
+      }
+    };
+
+    // Run check upon mount or when backup dependencies change
+    checkAndExecuteDailyTelegramBackup();
+
+    // Check periodically every 10 minutes
+    const timer = setInterval(checkAndExecuteDailyTelegramBackup, 10 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [
+    config.telegramAutoDailyBackup,
+    config.telegramBotToken,
+    config.telegramChatId,
+    config.telegramDailyBackupTime,
+    config.lastTelegramDailyBackupDate,
+    employees,
+    shifts,
+    attendanceRecords,
+    workReports,
+    assignments,
+    notifications,
+    emailLogs,
+  ]);
+
+  // Activity heartbeat for 30-day secure session
+  useEffect(() => {
+    if (!role) return;
+    const handleActivity = () => {
+      touchSecureSessionActivity();
+    };
+    window.addEventListener('click', handleActivity, { passive: true });
+    window.addEventListener('keydown', handleActivity, { passive: true });
+    return () => {
+      window.removeEventListener('click', handleActivity);
+      window.removeEventListener('keydown', handleActivity);
+    };
+  }, [role]);
+
+  // Clear Data Handler (Professional Reset for New Clean Operations)
+  const handleClearData = (mode: 'operational' | 'full') => {
+    if (mode === 'operational') {
+      // Clear operational records only: attendances, reports, assignments, notifications, emailLogs
+      setAttendanceRecords([]);
+      setWorkReports([]);
+      setAssignments([]);
+      setNotifications([]);
+      setEmailLogs([]);
+
+      localStorage.removeItem('app_attendances');
+      localStorage.removeItem('app_work_reports');
+      localStorage.removeItem('app_temporary_assignments');
+      localStorage.removeItem('app_notifications');
+      localStorage.removeItem('app_email_logs');
+
+      showToast('Data operasional (presensi, laporan, tugas, notifikasi) berhasil dibersihkan!');
+      handleSendPushNotification(
+        'Pembersihan Data Operasional Berhasil',
+        'Seluruh catatan presensi GPS dan laporan kerja telah direset untuk siklus operasional baru.',
+        'info'
+      );
+    } else {
+      // Full reset: clear all operational data and employee rosters, reset shifts
+      setAttendanceRecords([]);
+      setWorkReports([]);
+      setAssignments([]);
+      setNotifications([]);
+      setEmailLogs([]);
+      setEmployees([]);
+      setShifts(INITIAL_SHIFTS);
+
+      localStorage.removeItem('app_attendances');
+      localStorage.removeItem('app_work_reports');
+      localStorage.removeItem('app_temporary_assignments');
+      localStorage.removeItem('app_notifications');
+      localStorage.removeItem('app_email_logs');
+      localStorage.removeItem('app_employees');
+      localStorage.removeItem('app_shifts');
+      terminateSecure30DaySession();
+
+      showToast('Seluruh basis data sistem berhasil dikosongkan untuk mulai baru profesional!');
+      handleSendPushNotification(
+        'Sistem Direset Menyeluruh',
+        'Basis data telah dikosongkan. Anda dapat mendaftarkan karyawan baru atau memulihkan data dari cadangan Telegram.',
+        'info'
+      );
+    }
+  };
+
+  // Restore Data Handler
+  const handleRestoreData = (backup: SystemBackupData, mode: 'replace' | 'merge') => {
+    if (mode === 'replace') {
+      if (backup.config) {
+        setConfig(backup.config);
+        localStorage.setItem('app_company_config', JSON.stringify(backup.config));
+      }
+      if (backup.employees) {
+        setEmployees(backup.employees);
+        localStorage.setItem('app_employees', JSON.stringify(backup.employees));
+      }
+      if (backup.shifts) {
+        setShifts(backup.shifts);
+        localStorage.setItem('app_shifts', JSON.stringify(backup.shifts));
+      }
+      if (backup.attendanceRecords) {
+        setAttendanceRecords(backup.attendanceRecords);
+        localStorage.setItem('app_attendances', JSON.stringify(backup.attendanceRecords));
+      }
+      if (backup.workReports) {
+        setWorkReports(backup.workReports);
+        localStorage.setItem('app_work_reports', JSON.stringify(backup.workReports));
+      }
+      if (backup.assignments) {
+        setAssignments(backup.assignments);
+        localStorage.setItem('app_temporary_assignments', JSON.stringify(backup.assignments));
+      }
+      if (backup.notifications) {
+        setNotifications(backup.notifications);
+        localStorage.setItem('app_notifications', JSON.stringify(backup.notifications));
+      }
+      if (backup.emailLogs) {
+        setEmailLogs(backup.emailLogs);
+      }
+
+      showToast('Pemulihan database (Ganti Total) berhasil diselesaikan!');
+      handleSendPushNotification(
+        'Pemulihan Database Sukses',
+        `Data sistem berhasil dipulihkan dari cadangan versi ${backup.version || '1.0'} (${backup.timestamp}).`,
+        'info'
+      );
+    } else {
+      // Merge mode: deduplicate by ID
+      if (backup.employees && backup.employees.length > 0) {
+        setEmployees((prev) => {
+          const ids = new Set(prev.map((e) => e.id));
+          const additions = backup.employees.filter((e) => !ids.has(e.id));
+          const merged = [...prev, ...additions];
+          localStorage.setItem('app_employees', JSON.stringify(merged));
+          return merged;
+        });
+      }
+      if (backup.shifts && backup.shifts.length > 0) {
+        setShifts((prev) => {
+          const ids = new Set(prev.map((s) => s.id));
+          const additions = backup.shifts.filter((s) => !ids.has(s.id));
+          const merged = [...prev, ...additions];
+          localStorage.setItem('app_shifts', JSON.stringify(merged));
+          return merged;
+        });
+      }
+      if (backup.attendanceRecords && backup.attendanceRecords.length > 0) {
+        setAttendanceRecords((prev) => {
+          const ids = new Set(prev.map((a) => a.id));
+          const additions = backup.attendanceRecords.filter((a) => !ids.has(a.id));
+          const merged = [...additions, ...prev];
+          localStorage.setItem('app_attendances', JSON.stringify(merged));
+          return merged;
+        });
+      }
+      if (backup.workReports && backup.workReports.length > 0) {
+        setWorkReports((prev) => {
+          const ids = new Set(prev.map((w) => w.id));
+          const additions = backup.workReports.filter((w) => !ids.has(w.id));
+          const merged = [...additions, ...prev];
+          localStorage.setItem('app_work_reports', JSON.stringify(merged));
+          return merged;
+        });
+      }
+      if (backup.assignments && backup.assignments.length > 0) {
+        setAssignments((prev) => {
+          const ids = new Set(prev.map((a) => a.id));
+          const additions = backup.assignments.filter((a) => !ids.has(a.id));
+          const merged = [...prev, ...additions];
+          localStorage.setItem('app_temporary_assignments', JSON.stringify(merged));
+          return merged;
+        });
+      }
+
+      showToast('Data cadangan berhasil digabungkan dengan data yang ada!');
+      handleSendPushNotification(
+        'Penggabungan Data Selesai',
+        'Data baru dari file cadangan berhasil diintegrasikan ke dalam sistem.',
+        'info'
+      );
+    }
   };
 
   // Assignment handlers
@@ -287,6 +580,8 @@ export default function App() {
       overtimePay: 0,
       isOvertimeApproved: false,
       notes: recordData.notes,
+      verificationPhoto: recordData.verificationPhoto,
+      remoteAttachmentPhoto: recordData.remoteAttachmentPhoto,
     };
 
     setAttendanceRecords((prev) => [newRecord, ...prev]);
@@ -375,8 +670,13 @@ export default function App() {
     );
   };
 
-  // Handle Login Modal Callback (Strictly no auto-login session persistence)
-  const handleLoginSuccess = (newRole: UserRole, emp?: Employee) => {
+  // Handle Login Modal Callback (With 30-day anti-breach remember session support)
+  const handleLoginSuccess = (
+    newRole: UserRole, 
+    emp?: Employee, 
+    rememberMe: boolean = true, 
+    passwordUsed?: string
+  ) => {
     setRole(newRole);
     if (newRole === 'employee' && emp) {
       setCurrentEmployee(emp);
@@ -384,16 +684,29 @@ export default function App() {
       setCurrentEmployee(null);
     }
     setIsLoginModalOpen(false);
-    showToast(`Masuk sebagai ${newRole === 'admin' ? 'Administrator HRD' : emp?.name}`);
+
+    if (rememberMe && passwordUsed) {
+      storeSecure30DaySession({
+        role: newRole,
+        employee: emp,
+        passwordUsed,
+        rememberMe: true,
+      });
+      showToast(`Masuk sebagai ${newRole === 'admin' ? 'Administrator HRD' : emp?.name} • Sesi aman 30 hari aktif`);
+    } else {
+      terminateSecure30DaySession();
+      showToast(`Masuk sebagai ${newRole === 'admin' ? 'Administrator HRD' : emp?.name}`);
+    }
   };
 
-  // Handle Logout (Completely clear session)
+  // Handle Logout (Completely clear session and 30-day persistent state)
   const handleLogout = () => {
+    terminateSecure30DaySession();
     sessionStorage.removeItem('app_auth_session');
     setRole(null);
     setCurrentEmployee(null);
     setIsLoginModalOpen(true);
-    showToast('Anda telah berhasil keluar (logout).');
+    showToast('Anda telah keluar (logout) dan sesi aman perangkat telah diakhiri.');
   };
 
   // Handle Admin Password & Username update
@@ -409,10 +722,13 @@ export default function App() {
     localStorage.setItem('app_admin_username', finalUser);
     localStorage.setItem('app_company_config', JSON.stringify(updated));
 
-    showToast('Password Administrator berhasil diperbarui dan disimpan.');
+    // When admin password changes, terminate previous 30-day sessions to prevent stale unauthorized access
+    terminateSecure30DaySession();
+
+    showToast('Password Administrator berhasil diperbarui dan sesi lama dicabut.');
     handleSendPushNotification(
       'Password Admin Diperbarui',
-      'Kata sandi akun Administrator berhasil diubah dan disimpan dengan aman.',
+      'Kata sandi akun Administrator berhasil diubah. Sesi 30 hari lama otomatis dicabut demi keamanan.',
       'info'
     );
   };
@@ -479,6 +795,9 @@ export default function App() {
         onOpenSpreadsheetModal={() => setIsSpreadsheetModalOpen(true)}
         onOpenChangePassword={() => setIsChangePasswordModalOpen(true)}
         onOpenCompanyProfile={() => setAdminActiveTab('company-profile')}
+        onOpenBackupModal={() => setIsBackupModalOpen(true)}
+        onOpenClearModal={() => setIsClearModalOpen(true)}
+        onOpenSecureSessionModal={() => setIsSecureSessionModalOpen(true)}
         onSwitchUser={() => setIsLoginModalOpen(true)}
         onLogout={handleLogout}
         isSyncingSheets={isSyncingSheets}
@@ -542,6 +861,12 @@ export default function App() {
             onSaveAssignment={handleSaveAssignment}
             onUpdateAssignmentStatus={handleUpdateAssignmentStatus}
             onDeleteAssignment={handleDeleteAssignment}
+            notifications={notifications}
+            emailLogs={emailLogs}
+            onClearData={handleClearData}
+            onRestoreData={handleRestoreData}
+            onOpenClearModal={() => setIsClearModalOpen(true)}
+            onOpenBackupRestoreModal={() => setIsBackupModalOpen(true)}
             onManualSyncSheets={handleManualSyncSheets}
             isSyncingSheets={isSyncingSheets}
             onTriggerEmailAlert={handleTriggerEmailAlert}
@@ -596,6 +921,14 @@ export default function App() {
         onSave={handleUpdateAdminPassword}
       />
 
+      <SecureSessionModal
+        isOpen={isSecureSessionModalOpen}
+        onClose={() => setIsSecureSessionModalOpen(false)}
+        role={role}
+        currentEmployee={currentEmployee}
+        onTerminateSession={handleLogout}
+      />
+
       <NotificationCenter
         isOpen={isNotificationsOpen}
         notifications={notifications}
@@ -619,6 +952,68 @@ export default function App() {
         onManualSync={handleManualSyncSheets}
         isSyncing={isSyncingSheets}
         lastSyncTime={config.lastSheetsSyncTime}
+      />
+
+      {/* Modal Pembersihan Data (Clear Data) */}
+      <ClearDataModal
+        isOpen={isClearModalOpen}
+        onClose={() => setIsClearModalOpen(false)}
+        onConfirmClear={handleClearData}
+        totalEmployees={employees.length}
+        totalAttendance={attendanceRecords.length}
+        totalReports={workReports.length}
+        totalAssignments={assignments.length}
+        totalNotifications={notifications.length}
+        backupData={currentBackupData}
+        hasTelegramConfigured={Boolean(config.telegramBotToken && config.telegramChatId)}
+        onSendTelegramBackup={async () => {
+          if (!config.telegramBotToken || !config.telegramChatId) {
+            showToast('Token Bot dan Chat ID Telegram belum dikonfigurasi.');
+            return;
+          }
+          const res = await sendTelegramBackupDocument(config, currentBackupData);
+          if (res.success) {
+            const updated = {
+              ...config,
+              lastTelegramBackupTime: formatIndonesianDateTime(new Date()),
+              lastTelegramBackupStatus: 'success' as const,
+              lastTelegramBackupMessage: 'Berhasil dikirim ke Telegram',
+            };
+            setConfig(updated);
+            localStorage.setItem('app_company_config', JSON.stringify(updated));
+            showToast('Cadangan database berhasil dikirim ke Telegram!');
+          } else {
+            showToast(`Gagal kirim ke Telegram: ${res.message || res.error}`);
+          }
+        }}
+      />
+
+      {/* Modal Cadangan Harian & Pemulihan Database Telegram Bot */}
+      <BackupRestoreModal
+        isOpen={isBackupModalOpen}
+        onClose={() => setIsBackupModalOpen(false)}
+        config={config}
+        onUpdateConfig={handleUpdateConfig}
+        backupData={currentBackupData}
+        onRestoreData={handleRestoreData}
+        onShowToast={showToast}
+        onSendTelegramBackup={async () => {
+          if (!config.telegramBotToken || !config.telegramChatId) {
+            return { success: false, error: 'Token Bot dan Chat ID Telegram belum dikonfigurasi.' };
+          }
+          const res = await sendTelegramBackupDocument(config, currentBackupData);
+          if (res.success) {
+            const updated = {
+              ...config,
+              lastTelegramBackupTime: formatIndonesianDateTime(new Date()),
+              lastTelegramBackupStatus: 'success' as const,
+              lastTelegramBackupMessage: 'Berhasil dikirim ke Telegram',
+            };
+            setConfig(updated);
+            localStorage.setItem('app_company_config', JSON.stringify(updated));
+          }
+          return res;
+        }}
       />
     </div>
   );

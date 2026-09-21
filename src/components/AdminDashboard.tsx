@@ -37,7 +37,10 @@ import {
   Plane,
   Building2,
   Upload,
-  Calendar
+  Calendar,
+  Bot,
+  Database,
+  FileJson
 } from 'lucide-react';
 import { 
   AttendanceRecord, 
@@ -47,12 +50,22 @@ import {
   Shift, 
   OvertimeMultiplierRule,
   WorkReport,
-  TemporaryLocationAssignment
+  TemporaryLocationAssignment,
+  SystemBackupData,
+  PushNotification,
+  EmailLog
 } from '../types';
 import { calculateDistanceMeters, formatDistance, getCurrentCoordinates } from '../utils/geo';
 import { computeEmployeePayroll, formatIDR, getPayrollCycleInfo } from '../utils/payroll';
 import { exportPayrollReportPDF, exportSingleEmployeeSlipPDF, PAYSLIP_TEMPLATES, PayslipTemplateId } from '../utils/exportPdf';
 import { exportPayrollAndAttendanceExcel } from '../utils/exportExcel';
+import { 
+  generateSystemBackupData, 
+  sendTelegramBackupDocument, 
+  downloadBackupJsonFile, 
+  testTelegramBotConnection, 
+  formatIndonesianDateTime 
+} from '../utils/telegramBackup';
 import { AdminWorkReportSection } from './AdminWorkReportSection';
 import { AttendanceCharts } from './AttendanceCharts';
 import { LiveEmployeeDashboard } from './LiveEmployeeDashboard';
@@ -65,6 +78,8 @@ import { ChangeAdminPasswordModal } from './ChangeAdminPasswordModal';
 import { TemporaryDutyModal } from './TemporaryDutyModal';
 import { HolidayOvertimeManager } from './HolidayOvertimeManager';
 import { CompanyProfileSettings } from './CompanyProfileSettings';
+import { ClearDataModal } from './ClearDataModal';
+import { BackupRestoreModal } from './BackupRestoreModal';
 
 interface AdminDashboardProps {
   config: CompanyConfig;
@@ -81,11 +96,17 @@ interface AdminDashboardProps {
   onSaveAssignment?: (assignment: TemporaryLocationAssignment) => void;
   onUpdateAssignmentStatus?: (id: string, status: 'active' | 'completed' | 'cancelled') => void;
   onDeleteAssignment?: (id: string) => void;
+  notifications?: PushNotification[];
+  emailLogs?: EmailLog[];
+  onClearData?: (mode: 'operational' | 'full') => void;
+  onRestoreData?: (data: SystemBackupData, mode: 'replace' | 'merge') => void;
+  onOpenClearModal?: () => void;
+  onOpenBackupRestoreModal?: () => void;
   onManualSyncSheets: () => void;
   isSyncingSheets: boolean;
   onTriggerEmailAlert: (to: string, subject: string, event: string, desc: string) => void;
   onSendPushNotification: (title: string, message: string, type: 'shift' | 'attendance' | 'payroll' | 'info') => void;
-  initialTab?: 'live-employees' | 'attendance-maps' | 'attendance' | 'attendance-charts' | 'payroll' | 'holiday-overtime' | 'rules' | 'company-profile' | 'sheets' | 'reports' | 'employees' | 'work-reports';
+  initialTab?: 'live-employees' | 'attendance-maps' | 'attendance' | 'attendance-charts' | 'payroll' | 'holiday-overtime' | 'rules' | 'company-profile' | 'sheets' | 'reports' | 'employees' | 'work-reports' | 'backup-restore';
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
@@ -103,14 +124,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onSaveAssignment,
   onUpdateAssignmentStatus,
   onDeleteAssignment,
+  notifications = [],
+  emailLogs = [],
+  onClearData,
+  onRestoreData,
   onManualSyncSheets,
   isSyncingSheets,
   onTriggerEmailAlert,
   onSendPushNotification,
   initialTab,
 }) => {
-  const [activeTab, setActiveTab] = useState<'live-employees' | 'attendance-maps' | 'attendance' | 'attendance-charts' | 'payroll' | 'holiday-overtime' | 'rules' | 'company-profile' | 'sheets' | 'reports' | 'employees' | 'work-reports'>(initialTab || 'live-employees');
+  const [activeTab, setActiveTab] = useState<'live-employees' | 'attendance-maps' | 'attendance' | 'attendance-charts' | 'payroll' | 'holiday-overtime' | 'rules' | 'company-profile' | 'sheets' | 'reports' | 'employees' | 'work-reports' | 'backup-restore'>(initialTab || 'live-employees');
   const [targetMapEmployeeId, setTargetMapEmployeeId] = useState<string | undefined>(undefined);
+
+  // Backup & Clear Data Modals state
+  const [isClearModalOpen, setIsClearModalOpen] = useState(false);
+  const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
   
   // Department filter
   const [selectedDepartment, setSelectedDepartment] = useState<string>('Semua');
@@ -125,6 +154,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   useEffect(() => {
     setLocalConfig({ ...config });
   }, [config]);
+
+  // Local dashboard notification toast
+  const [dashboardToast, setDashboardToast] = useState<string | null>(null);
+  const showDashboardToast = (msg: string) => {
+    setDashboardToast(msg);
+    setTimeout(() => setDashboardToast(null), 4000);
+  };
+
+  // Generate current backup data snapshot
+  const currentBackupData: SystemBackupData = generateSystemBackupData({
+    config: localConfig,
+    employees,
+    shifts,
+    attendanceRecords,
+    workReports,
+    assignments,
+    notifications,
+    emailLogs,
+  });
 
   // Employee Add / Edit / Delete Modal states
   const [adminSlipTemplate, setAdminSlipTemplate] = useState<PayslipTemplateId>('corporate-emerald');
@@ -482,8 +530,46 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <KeyRound className="w-3.5 h-3.5 text-slate-600" />
             <span>Ganti Password Admin</span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => setIsBackupModalOpen(true)}
+            className="flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-sky-50 text-sky-800 hover:bg-sky-100 border border-sky-200 transition cursor-pointer shadow-sm"
+            title="Backup Database & Telegram Bot"
+          >
+            <Bot className="w-3.5 h-3.5 text-sky-600" />
+            <span>Backup & Telegram</span>
+            {localConfig.lastTelegramBackupStatus === 'success' && (
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setIsClearModalOpen(true)}
+            className="flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200 transition cursor-pointer shadow-sm"
+            title="Pembersihan Data untuk Mulai Baru Profesional"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+            <span>Bersihkan Data (Mulai Baru)</span>
+          </button>
         </div>
       </div>
+
+      {dashboardToast && (
+        <div className="p-3.5 rounded-2xl bg-indigo-900 text-white text-xs font-bold flex items-center justify-between shadow-lg animate-in slide-in-from-top duration-200">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-emerald-400" />
+            <span>{dashboardToast}</span>
+          </div>
+          <button
+            onClick={() => setDashboardToast(null)}
+            className="text-indigo-200 hover:text-white text-xs cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Navigation Tabs (Mobile-Friendly & Desktop Clean) */}
       <div className="space-y-2">
@@ -504,6 +590,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               {activeTab === 'company-profile' && 'Profil & Nama App'}
               {activeTab === 'reports' && 'Ekspor Laporan'}
               {activeTab === 'sheets' && 'Spreadsheet DB'}
+              {activeTab === 'backup-restore' && 'Backup & Telegram'}
             </span>
           </div>
 
@@ -525,6 +612,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <option value="company-profile">🏢 Profil Perusahaan & Nama Aplikasi</option>
               <option value="reports">📑 Ekspor Laporan Departemen</option>
               <option value="sheets">🔗 Integrasi Spreadsheet (DB)</option>
+              <option value="backup-restore">💾 Backup Harian & Restore Telegram Bot</option>
             </select>
             <ChevronDown className="w-4 h-4 text-slate-500 absolute right-3 top-3 pointer-events-none" />
           </div>
@@ -642,6 +730,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               }`}
             >
               Spreadsheet
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('backup-restore')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition shrink-0 flex items-center gap-1.5 ${
+                activeTab === 'backup-restore' ? 'bg-sky-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600'
+              }`}
+            >
+              <Bot className="w-3 h-3 text-sky-400" />
+              <span>Backup Telegram</span>
             </button>
           </div>
         </div>
@@ -811,6 +909,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           >
             <FileSpreadsheet className={`w-4 h-4 ${activeTab === 'sheets' ? 'text-emerald-400' : 'text-slate-400'}`} />
             <span>Spreadsheet DB</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('backup-restore')}
+            className={`py-2.5 px-3.5 text-xs font-bold whitespace-nowrap rounded-xl flex items-center gap-2 transition cursor-pointer ${
+              activeTab === 'backup-restore'
+                ? 'bg-sky-700 text-white shadow-sm shadow-sky-950/20'
+                : 'text-slate-600 hover:bg-sky-50 hover:text-sky-900'
+            }`}
+          >
+            <Bot className={`w-4 h-4 ${activeTab === 'backup-restore' ? 'text-white' : 'text-sky-500'}`} />
+            <span>Backup & Telegram</span>
+            {localConfig.lastTelegramBackupStatus === 'success' && (
+              <span className="w-2 h-2 rounded-full bg-emerald-400" />
+            )}
           </button>
         </div>
       </div>
@@ -2414,6 +2528,149 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         />
       )}
 
+      {/* TAB: CADANGAN HARIAN & RESTORE TELEGRAM BOT */}
+      {activeTab === 'backup-restore' && (
+        <div className="space-y-6">
+          <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="p-2 rounded-xl bg-sky-100 text-sky-700">
+                    <Bot className="w-5 h-5" />
+                  </span>
+                  <div>
+                    <h2 className="text-base sm:text-lg font-extrabold text-slate-900">
+                      Cadangan Harian & Pemulihan Basis Data (Telegram Bot)
+                    </h2>
+                    <p className="text-xs text-slate-500">
+                      Amankan seluruh data operasional, master karyawan, presensi GPS, dan slip gaji secara persisten.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setIsBackupModalOpen(true)}
+                  className="px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs shadow-xs transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Bot className="w-4 h-4" />
+                  <span>Buka Panel Backup & Restore</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsClearModalOpen(true)}
+                  className="px-4 py-2.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs border border-rose-200 transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Bersihkan Data (Mulai Baru)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Metrics of Snapshot */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="text-[11px] font-bold text-slate-500">Total Karyawan</div>
+                <div className="text-xl font-extrabold text-slate-900 mt-1">{employees.length}</div>
+                <div className="text-[10px] text-slate-400 mt-0.5">Master data staf & gaji</div>
+              </div>
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="text-[11px] font-bold text-slate-500">Log Presensi GPS</div>
+                <div className="text-xl font-extrabold text-slate-900 mt-1">{attendanceRecords.length}</div>
+                <div className="text-[10px] text-slate-400 mt-0.5">Check-in, out, foto & koordinat</div>
+              </div>
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="text-[11px] font-bold text-slate-500">Laporan Kerja</div>
+                <div className="text-xl font-extrabold text-slate-900 mt-1">{workReports.length}</div>
+                <div className="text-[10px] text-slate-400 mt-0.5">Aktivitas harian shift</div>
+              </div>
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="text-[11px] font-bold text-slate-500">Status Bot Telegram</div>
+                <div className="text-xs font-extrabold mt-2">
+                  {localConfig.telegramBotToken && localConfig.telegramChatId ? (
+                    <span className="inline-flex items-center gap-1 text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                      <CheckCircle2 className="w-3 h-3" /> Terhubung
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                      <AlertCircle className="w-3 h-3" /> Belum Diatur
+                    </span>
+                  )}
+                </div>
+                <div className="text-[10px] text-slate-400 mt-1">
+                  {localConfig.lastTelegramBackupTime ? `Terakhir: ${localConfig.lastTelegramBackupTime.slice(0, 10)}` : 'Belum pernah dikirim'}
+                </div>
+              </div>
+            </div>
+
+            {/* Direct Actions Box */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="p-5 rounded-2xl bg-gradient-to-br from-sky-50 to-indigo-50/50 border border-sky-200 space-y-3">
+                <div className="flex items-center gap-2 text-sky-900 font-extrabold text-sm">
+                  <Download className="w-4 h-4 text-sky-600" />
+                  <span>Unduh File Cadangan (.JSON) Mandiri</span>
+                </div>
+                <p className="text-xs text-sky-900/80 leading-relaxed">
+                  Ekspor file snapshot JSON utuh yang berisi seluruh master karyawan, riwayat kehadiran, master shift, tugas luar kota, serta profil perusahaan Anda untuk disimpan di komputer lokal atau flashdisk.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    downloadBackupJsonFile(currentBackupData);
+                    showDashboardToast('Berkas cadangan .JSON berhasil diunduh ke komputer Anda.');
+                  }}
+                  className="px-4 py-2 rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs font-bold shadow-xs transition flex items-center gap-2 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Unduh File Cadangan (.JSON) Sekarang</span>
+                </button>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-gradient-to-br from-emerald-50 to-teal-50/50 border border-emerald-200 space-y-3">
+                <div className="flex items-center gap-2 text-emerald-950 font-extrabold text-sm">
+                  <Send className="w-4 h-4 text-emerald-600" />
+                  <span>Kirim Snapshot Langsung ke Telegram Bot</span>
+                </div>
+                <p className="text-xs text-emerald-900/80 leading-relaxed">
+                  Kirim file dokumen database terenkripsi langsung ke obrolan atau grup Telegram HRD Anda sekarang juga sebagai arsip cadangan resmi.
+                </p>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!localConfig.telegramBotToken || !localConfig.telegramChatId) {
+                      setIsBackupModalOpen(true);
+                      showDashboardToast('Silakan isi Bot Token & Chat ID Telegram Anda terlebih dahulu.');
+                      return;
+                    }
+                    showDashboardToast('Sedang mengirim cadangan ke Telegram...');
+                    const res = await sendTelegramBackupDocument(localConfig, currentBackupData);
+                    if (res.success) {
+                      const updated = {
+                        ...localConfig,
+                        lastTelegramBackupTime: formatIndonesianDateTime(new Date()),
+                        lastTelegramBackupStatus: 'success' as const,
+                        lastTelegramBackupMessage: 'Pengiriman manual sukses',
+                      };
+                      setLocalConfig(updated);
+                      onUpdateConfig(updated);
+                      showDashboardToast('Cadangan berhasil dikirim ke Telegram!');
+                    } else {
+                      showDashboardToast(`Gagal kirim ke Telegram: ${res.error}`);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs transition flex items-center gap-2 cursor-pointer"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>Kirim Cadangan ke Telegram Sekarang</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Modal Tambah Karyawan Baru */}
       <EmployeeModal
         isOpen={isAddEmployeeModalOpen}
@@ -2510,6 +2767,80 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           if (onDeleteAssignment) {
             onDeleteAssignment(id);
           }
+        }}
+      />
+
+      {/* Modal Pembersihan Data (Clear Data) */}
+      <ClearDataModal
+        isOpen={isClearModalOpen}
+        onClose={() => setIsClearModalOpen(false)}
+        onConfirmClear={(mode) => {
+          setIsClearModalOpen(false);
+          if (onClearData) {
+            onClearData(mode);
+          }
+        }}
+        totalEmployees={employees.length}
+        totalAttendance={attendanceRecords.length}
+        totalReports={workReports.length}
+        totalAssignments={assignments.length}
+        totalNotifications={notifications?.length || 0}
+        backupData={currentBackupData}
+        hasTelegramConfigured={Boolean(localConfig.telegramBotToken && localConfig.telegramChatId)}
+        onSendTelegramBackup={async () => {
+          if (!localConfig.telegramBotToken || !localConfig.telegramChatId) {
+            showDashboardToast('Token Bot dan Chat ID Telegram belum dikonfigurasi.');
+            return;
+          }
+          const res = await sendTelegramBackupDocument(localConfig, currentBackupData);
+          if (res.success) {
+            const updated = {
+              ...localConfig,
+              lastTelegramBackupTime: formatIndonesianDateTime(new Date()),
+              lastTelegramBackupStatus: 'success' as const,
+              lastTelegramBackupMessage: 'Berhasil dikirim ke Telegram',
+            };
+            setLocalConfig(updated);
+            onUpdateConfig(updated);
+            showDashboardToast('Cadangan database berhasil dikirim ke Telegram!');
+          } else {
+            showDashboardToast(`Gagal kirim ke Telegram: ${res.message || res.error}`);
+          }
+        }}
+      />
+
+      {/* Modal Cadangan Harian & Pemulihan Database Telegram Bot */}
+      <BackupRestoreModal
+        isOpen={isBackupModalOpen}
+        onClose={() => setIsBackupModalOpen(false)}
+        config={localConfig}
+        onUpdateConfig={(newCfg) => {
+          setLocalConfig(newCfg);
+          onUpdateConfig(newCfg);
+        }}
+        backupData={currentBackupData}
+        onRestoreData={(data, mode) => {
+          if (onRestoreData) {
+            onRestoreData(data, mode);
+          }
+        }}
+        onShowToast={showDashboardToast}
+        onSendTelegramBackup={async () => {
+          if (!localConfig.telegramBotToken || !localConfig.telegramChatId) {
+            return { success: false, error: 'Token Bot dan Chat ID Telegram belum dikonfigurasi.' };
+          }
+          const res = await sendTelegramBackupDocument(localConfig, currentBackupData);
+          if (res.success) {
+            const updated = {
+              ...localConfig,
+              lastTelegramBackupTime: formatIndonesianDateTime(new Date()),
+              lastTelegramBackupStatus: 'success' as const,
+              lastTelegramBackupMessage: 'Berhasil dikirim ke Telegram',
+            };
+            setLocalConfig(updated);
+            onUpdateConfig(updated);
+          }
+          return res;
         }}
       />
 

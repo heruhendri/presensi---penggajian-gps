@@ -20,10 +20,15 @@ import {
   Layers,
   Stamp,
   Sliders,
-  Info
+  Info,
+  Bot,
+  Send,
+  KeyRound,
+  Clock
 } from 'lucide-react';
 import { CompanyConfig } from '../types';
 import { INITIAL_CONFIG } from '../data/mockData';
+import { testTelegramBotConnection } from '../utils/telegramBackup';
 
 interface CompanyProfileSettingsProps {
   config: CompanyConfig;
@@ -48,10 +53,12 @@ export const CompanyProfileSettings: React.FC<CompanyProfileSettingsProps> = ({
     companyStampUrl: config.companyStampUrl || '',
   });
 
-  const [activeSubTab, setActiveSubTab] = useState<'app-identity' | 'company-legal' | 'contact-location' | 'logo-branding' | 'preview'>('app-identity');
+  const [activeSubTab, setActiveSubTab] = useState<'app-identity' | 'company-legal' | 'contact-location' | 'logo-branding' | 'telegram-backup' | 'preview'>('app-identity');
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
   const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
   const [isResetConfirmOpen, setIsResetConfirmOpen] = useState(false);
+  const [isTestingBot, setIsTestingBot] = useState(false);
+  const [botTestResult, setBotTestResult] = useState<{ success: boolean; botName?: string; username?: string; error?: string } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -257,6 +264,19 @@ export const CompanyProfileSettings: React.FC<CompanyProfileSettingsProps> = ({
         >
           <Upload className="w-3.5 h-3.5 text-amber-400" />
           <span>Logo & Stempel Perusahaan</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveSubTab('telegram-backup')}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap flex items-center gap-2 cursor-pointer ${
+            activeSubTab === 'telegram-backup'
+              ? 'bg-slate-900 text-white shadow-xs'
+              : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <Bot className="w-3.5 h-3.5 text-sky-400" />
+          <span>Cadangan Harian Bot Telegram</span>
         </button>
 
         <button
@@ -821,6 +841,195 @@ export const CompanyProfileSettings: React.FC<CompanyProfileSettingsProps> = ({
               <p className="text-[11px] text-indigo-900/80 leading-relaxed">
                 Seluruh logo dan konfigurasi profil tersimpan secara persisten di penyimpanan lokal (Local Storage) dan otomatis tersinkronisasi saat membuat laporan dan slip gaji.
               </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SUB-TAB: CADANGAN HARIAN TELEGRAM BOT */}
+      {activeSubTab === 'telegram-backup' && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6 space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+            <div>
+              <div className="flex items-center gap-2">
+                <Bot className="w-5 h-5 text-sky-600" />
+                <h3 className="font-extrabold text-base text-slate-900">
+                  Konfigurasi Cadangan Otomatis Harian Bot Telegram
+                </h3>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                Kirim dokumen snapshot basis data (.JSON) secara otomatis setiap hari langsung ke Bot atau Grup Telegram HRD Anda.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => handleSave()}
+              className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-xs transition flex items-center gap-1.5 cursor-pointer shrink-0"
+            >
+              <Check className="w-4 h-4" />
+              <span>Simpan Pengaturan Telegram</span>
+            </button>
+          </div>
+
+          {/* Status info of last backup */}
+          <div className="p-4 rounded-xl bg-sky-50/70 border border-sky-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+            <div className="space-y-1">
+              <span className="font-extrabold text-slate-900 flex items-center gap-1.5">
+                <Clock className="w-4 h-4 text-sky-600" />
+                <span>Status Cadangan Telegram Terakhir</span>
+              </span>
+              <div className="text-slate-600 text-[11px]">
+                Waktu: <strong>{formData.lastTelegramBackupTime || 'Belum ada pengiriman'}</strong>
+                {formData.lastTelegramBackupMessage && (
+                  <span className="block text-slate-500 mt-0.5">{formData.lastTelegramBackupMessage}</span>
+                )}
+              </div>
+            </div>
+
+            <div>
+              {formData.lastTelegramBackupStatus === 'success' ? (
+                <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Cadangan Terakhir Berhasil</span>
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold bg-slate-200 text-slate-700 border border-slate-300">
+                  <span>Siap Dijalankan</span>
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Inputs */}
+          <div className="space-y-4">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                  <KeyRound className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Telegram Bot Token</span>
+                </label>
+                <a
+                  href="https://t.me/BotFather"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[11px] text-sky-600 hover:text-sky-700 font-semibold flex items-center gap-1"
+                >
+                  <span>Dapatkan dari @BotFather</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="password"
+                  value={formData.telegramBotToken || ''}
+                  onChange={(e) => handleFieldChange('telegramBotToken', e.target.value)}
+                  placeholder="Contoh: 123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
+                  className="flex-1 px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs font-mono bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button
+                  type="button"
+                  disabled={isTestingBot}
+                  onClick={async () => {
+                    if (!formData.telegramBotToken) {
+                      setBotTestResult({ success: false, error: 'Masukkan Token Bot terlebih dahulu' });
+                      return;
+                    }
+                    setIsTestingBot(true);
+                    setBotTestResult(null);
+                    const res = await testTelegramBotConnection(formData.telegramBotToken);
+                    setIsTestingBot(false);
+                    setBotTestResult(res);
+                  }}
+                  className="px-4 py-2.5 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition shrink-0 cursor-pointer"
+                >
+                  {isTestingBot ? 'Memeriksa...' : 'Uji Token Bot'}
+                </button>
+              </div>
+
+              {botTestResult && (
+                <div className={`mt-2 p-2.5 rounded-xl text-xs font-semibold flex items-center gap-2 ${
+                  botTestResult.success ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-rose-50 text-rose-800 border border-rose-200'
+                }`}>
+                  {botTestResult.success ? (
+                    <>
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>Bot Valid: <strong>{botTestResult.botName}</strong> (@{botTestResult.username})</span>
+                    </>
+                  ) : (
+                    <>
+                      <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                      <span>Gagal: {botTestResult.error}</span>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-800 mb-1">
+                  Telegram Chat ID (Akun Anda atau ID Grup HRD)
+                </label>
+                <input
+                  type="text"
+                  value={formData.telegramChatId || ''}
+                  onChange={(e) => handleFieldChange('telegramChatId', e.target.value)}
+                  placeholder="Contoh: 123456789 atau -100123456789"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs font-mono bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  Untuk akun pribadi, cari ID Anda melalui bot Telegram <code>@userinfobot</code>.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-800 mb-1">
+                  Topic / Message Thread ID (Khusus Supergroup Forum)
+                </label>
+                <input
+                  type="text"
+                  value={formData.telegramTopicId || ''}
+                  onChange={(e) => handleFieldChange('telegramTopicId', e.target.value)}
+                  placeholder="Opsional, biarkan kosong untuk chat biasa"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs font-mono bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+            </div>
+
+            {/* Automation settings */}
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <span className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                    <Send className="w-4 h-4 text-sky-600" />
+                    <span>Jalankan Cadangan Otomatis Harian ke Telegram</span>
+                  </span>
+                  <p className="text-[11px] text-slate-500">
+                    Sistem akan otomatis mengekspor snapshot database dan mengirimkannya langsung ke Telegram setiap hari.
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={formData.telegramAutoDailyBackup ?? true}
+                  onChange={(e) => handleFieldChange('telegramAutoDailyBackup', e.target.checked)}
+                  className="w-4 h-4 text-indigo-600 rounded focus:ring-indigo-500 cursor-pointer"
+                />
+              </div>
+
+              {(formData.telegramAutoDailyBackup ?? true) && (
+                <div className="pt-2 border-t border-slate-200 flex items-center justify-between">
+                  <label className="text-xs font-semibold text-slate-700">
+                    Waktu Pengiriman Harian (WIB):
+                  </label>
+                  <input
+                    type="time"
+                    value={formData.telegramDailyBackupTime || '23:00'}
+                    onChange={(e) => handleFieldChange('telegramDailyBackupTime', e.target.value)}
+                    className="px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-bold bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              )}
             </div>
           </div>
         </div>

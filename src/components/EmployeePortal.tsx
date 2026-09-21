@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   MapPin, 
   Clock, 
@@ -26,7 +26,14 @@ import {
   LayoutGrid,
   Compass,
   ShieldAlert,
-  Lock
+  Lock,
+  RotateCw,
+  Maximize2,
+  Trash2,
+  Upload,
+  Check,
+  X,
+  Eye
 } from 'lucide-react';
 import { AttendanceRecord, CompanyConfig, Employee, Shift, WorkReport, TemporaryLocationAssignment } from '../types';
 import { 
@@ -41,6 +48,8 @@ import { exportSingleEmployeeSlipPDF, PAYSLIP_TEMPLATES, PayslipTemplateId } fro
 import { WorkReportModal } from './WorkReportModal';
 import { EmployeePerformanceCharts } from './EmployeePerformanceCharts';
 import { AttendanceMapsDashboard } from './AttendanceMapsDashboard';
+import { CameraVerificationModal } from './CameraVerificationModal';
+import { drawGpsWatermark, GpsWatermarkData } from '../utils/cameraWatermark';
 
 interface EmployeePortalProps {
   employee: Employee;
@@ -102,6 +111,9 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
   // Checkin Form notes
   const [attendanceNotes, setAttendanceNotes] = useState('');
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const [isCameraModalOpen, setIsCameraModalOpen] = useState(false);
+  const [previewZoomPhoto, setPreviewZoomPhoto] = useState<string | null>(null);
+  const directFileInputRef = useRef<HTMLInputElement>(null);
 
   // Keep clock running
   useEffect(() => {
@@ -344,21 +356,52 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
     }
   };
 
-  // Handle Photo Capture simulation
+  // Prepare GPS Watermark payload
+  const getWatermarkPayload = (): GpsWatermarkData => ({
+    lat: currentLat,
+    lng: currentLng,
+    accuracy: gpsAccuracy,
+    distanceToOffice: distanceToOffice,
+    officeRadius: targetRadiusMeters,
+    employeeName: employee.name,
+    employeeId: employee.id,
+    department: employee.department,
+    companyName: config.companyName,
+    appName: config.appName,
+    timestamp: currentTime,
+    statusLabel: isInsideRadius ? 'TERVERIFIKASI RADIUS KANTOR' : (activeDuty ? 'TERVERIFIKASI TUGAS DINAS' : 'DI LUAR RADIUS RESMI'),
+  });
+
+  // Handle Photo Capture using live camera modal
   const handleCapturePhoto = () => {
-    // Generates a mock selfie SVG/DataUrl
-    const timestampText = new Date().toLocaleTimeString('id-ID');
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">
-      <rect width="240" height="240" fill="#1e293b"/>
-      <circle cx="120" cy="90" r="45" fill="#10b981"/>
-      <circle cx="120" cy="85" r="35" fill="#334155"/>
-      <path d="M50 200 C50 150, 190 150, 190 200" fill="#047857"/>
-      <rect x="10" y="195" width="220" height="35" rx="6" fill="rgba(15, 23, 42, 0.8)"/>
-      <text x="120" y="215" fill="#ffffff" font-family="sans-serif" font-size="11" font-weight="bold" text-anchor="middle">VERIFIKASI PRESENSI GPS</text>
-      <text x="120" y="226" fill="#10b981" font-family="sans-serif" font-size="9" text-anchor="middle">${todayStr} ${timestampText} • ${formatDistance(distanceToOffice)}</text>
-    </svg>`;
-    const dataUrl = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
-    setPhotoPreview(dataUrl);
+    setIsCameraModalOpen(true);
+  };
+
+  // Handle direct file upload / gallery fallback with GPS coordinate watermark
+  const handleDirectPhotoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const watermarked = drawGpsWatermark(img, getWatermarkPayload());
+          setPhotoPreview(watermarked);
+        } catch (err) {
+          console.error('Failed to watermark uploaded photo:', err);
+          alert('Gagal menyematkan koordinat ke foto.');
+        }
+      };
+      img.onerror = () => {
+        alert('Berkas foto tidak valid.');
+      };
+      img.src = ev.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+    // Reset file input value so re-selecting same file triggers change
+    e.target.value = '';
   };
 
   // Check-In verification with automatic real location verification
@@ -446,12 +489,14 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
       overtimePay: 0,
       isOvertimeApproved: false,
       notes: attendanceNotes || (isDuty ? `[Penugasan Khusus: ${activeDuty.city} - ${activeDuty.title}] ${isLate ? 'Presensi terlambat' : 'Presensi tepat waktu'}` : (isLate ? 'Presensi terlambat' : 'Presensi tepat waktu terverifikasi')),
+      verificationPhoto: photoPreview || undefined,
     });
 
     setCheckInSuccessBanner(
       `Check-in berhasil tercatat! Lokasi GPS otomatis terkunci: Lat ${locResult.lat.toFixed(6)}, Lng ${locResult.lng.toFixed(6)} (${formatDistance(locResult.distance)} dari ${locLabel}, Akurasi: ±${Math.round(locResult.accuracy)}m).`
     );
     setAttendanceNotes('');
+    setPhotoPreview(null);
   };
 
   const proceedCheckOut = async () => {
@@ -1232,32 +1277,130 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
               <div className="pt-2">
                 <div className="flex items-center justify-between mb-2">
                   <label className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
-                    <Camera className="w-4 h-4 text-slate-500" />
-                    Foto Verifikasi Presensi (Opsional)
+                    <Camera className="w-4 h-4 text-emerald-600" />
+                    <span>Foto Verifikasi Presensi</span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-700 border border-emerald-200">
+                      Geotagged
+                    </span>
                   </label>
-                  <button
-                    type="button"
-                    onClick={handleCapturePhoto}
-                    className="text-[11px] text-emerald-600 hover:text-emerald-700 font-medium"
-                  >
-                    {photoPreview ? 'Ambil Ulang' : 'Ambil Foto Presensi'}
-                  </button>
+                  {photoPreview && (
+                    <button
+                      type="button"
+                      onClick={() => setIsCameraModalOpen(true)}
+                      className="text-[11px] text-emerald-600 hover:text-emerald-700 font-bold flex items-center gap-1 cursor-pointer"
+                    >
+                      <RotateCw className="w-3 h-3" />
+                      <span>Ambil Ulang</span>
+                    </button>
+                  )}
                 </div>
 
                 {photoPreview ? (
-                  <div className="relative rounded-xl overflow-hidden border border-emerald-200 bg-slate-900 flex items-center justify-center p-2">
-                    <img src={photoPreview} alt="Selfie Presensi" className="max-h-36 rounded-lg object-contain" />
-                    <span className="absolute bottom-3 left-3 bg-slate-950/80 text-emerald-400 px-2 py-0.5 rounded text-[10px] font-mono">
-                      Watermark GPS Valid
-                    </span>
+                  <div className="rounded-2xl border border-emerald-300/80 bg-slate-900 p-2.5 shadow-sm space-y-2">
+                    <div className="relative rounded-xl overflow-hidden bg-black flex items-center justify-center group min-h-[160px]">
+                      <img 
+                        src={photoPreview} 
+                        alt="Foto Presensi Terverifikasi" 
+                        className="max-h-52 w-full object-contain rounded-lg" 
+                      />
+                      {/* Hover / Overlay action buttons */}
+                      <div className="absolute inset-0 bg-slate-950/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 p-2">
+                        <button
+                          type="button"
+                          onClick={() => setPreviewZoomPhoto(photoPreview)}
+                          className="px-3 py-1.5 rounded-lg bg-white/95 hover:bg-white text-slate-900 text-xs font-bold flex items-center gap-1.5 shadow transition cursor-pointer"
+                        >
+                          <Maximize2 className="w-3.5 h-3.5" />
+                          <span>Lihat Penuh</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setIsCameraModalOpen(true)}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 shadow transition cursor-pointer"
+                        >
+                          <Camera className="w-3.5 h-3.5" />
+                          <span>Foto Ulang</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPhotoPreview(null)}
+                          className="p-1.5 rounded-lg bg-rose-600/90 hover:bg-rose-700 text-white shadow transition cursor-pointer"
+                          title="Hapus foto"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      <span className="absolute bottom-2 left-2 bg-slate-950/85 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded text-[10px] font-mono flex items-center gap-1">
+                        <Check className="w-3 h-3 text-emerald-400" />
+                        <span>Watermark Koordinat Aktif</span>
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between px-1 text-[11px] text-slate-300">
+                      <div className="flex items-center gap-1 text-emerald-400 font-mono text-[10px] truncate max-w-[240px]">
+                        <MapPin className="w-3 h-3 shrink-0" />
+                        <span>Lat {currentLat.toFixed(5)}, Lng {currentLng.toFixed(5)}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setPreviewZoomPhoto(photoPreview)}
+                        className="text-slate-400 hover:text-emerald-300 text-[11px] underline cursor-pointer shrink-0"
+                      >
+                        Perbesar Foto
+                      </button>
+                    </div>
                   </div>
                 ) : (
-                  <div 
-                    onClick={handleCapturePhoto}
-                    className="cursor-pointer border-2 border-dashed border-slate-200 hover:border-emerald-400 rounded-xl p-4 text-center text-slate-500 hover:bg-emerald-50/40 transition"
-                  >
-                    <Camera className="w-6 h-6 mx-auto mb-1 text-slate-400" />
-                    <span className="text-xs">Klik untuk mengambil foto presensi dengan watermark koordinat</span>
+                  <div className="rounded-2xl border-2 border-dashed border-slate-200 hover:border-emerald-400 bg-slate-50/60 hover:bg-emerald-50/20 p-4 transition text-center space-y-3">
+                    <div className="flex flex-col items-center justify-center space-y-1">
+                      <div className="w-11 h-11 rounded-2xl bg-emerald-100 border border-emerald-200 text-emerald-700 flex items-center justify-center shadow-2xs">
+                        <Camera className="w-5 h-5" />
+                      </div>
+                      <div className="font-bold text-xs text-slate-800">
+                        Ambil Foto Bukti Presensi
+                      </div>
+                      <p className="text-[11px] text-slate-500 max-w-xs leading-relaxed">
+                        Kamera akan otomatis menyematkan titik koordinat satelit GPS, waktu presisi, dan nama Anda ke dalam foto.
+                      </p>
+                    </div>
+
+                    {/* Coordinates preview pill */}
+                    <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-100 border border-slate-200 text-slate-700 text-[10px] font-mono">
+                      <Navigation className="w-3 h-3 text-emerald-600" />
+                      <span>Siap Watermark: {currentLat.toFixed(5)}, {currentLng.toFixed(5)}</span>
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div className="flex items-center justify-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setIsCameraModalOpen(true)}
+                        className="flex-1 max-w-[200px] py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm shadow-emerald-700/20 transition cursor-pointer"
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                        <span>Buka Kamera</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => directFileInputRef.current?.click()}
+                        className="py-2.5 px-3 rounded-xl border border-slate-300 hover:bg-white bg-slate-50 text-slate-700 font-semibold text-xs flex items-center gap-1.5 shadow-2xs transition cursor-pointer"
+                        title="Pilih foto dari berkas galeri atau kamera HP"
+                      >
+                        <Upload className="w-3.5 h-3.5 text-slate-500" />
+                        <span className="hidden sm:inline">Pilih File</span>
+                      </button>
+                    </div>
+
+                    {/* Hidden file input */}
+                    <input
+                      ref={directFileInputRef}
+                      type="file"
+                      accept="image/*"
+                      capture="user"
+                      onChange={handleDirectPhotoFile}
+                      className="hidden"
+                    />
                   </div>
                 )}
               </div>
@@ -1783,6 +1926,23 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
                     "{rec.notes}"
                   </p>
                 )}
+
+                {rec.verificationPhoto && (
+                  <div className="pt-2 border-t border-slate-200/70 flex items-center justify-between">
+                    <span className="text-[10px] text-slate-500 font-sans flex items-center gap-1">
+                      <Camera className="w-3 h-3 text-emerald-600" />
+                      <span>Foto Bukti Geotag:</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewZoomPhoto(rec.verificationPhoto || null)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-[11px] font-semibold transition cursor-pointer"
+                    >
+                      <Eye className="w-3 h-3 text-emerald-600" />
+                      <span>Lihat Foto GPS</span>
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -1799,6 +1959,7 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
                   <th className="py-3 px-4">Lembur</th>
                   <th className="py-3 px-4">Status</th>
                   <th className="py-3 px-4">Validasi GPS</th>
+                  <th className="py-3 px-4">Foto Bukti</th>
                   <th className="py-3 px-4">Catatan</th>
                 </tr>
               </thead>
@@ -1837,6 +1998,21 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
                         </span>
                       ) : (
                         '-'
+                      )}
+                    </td>
+                    <td className="py-3 px-4">
+                      {rec.verificationPhoto ? (
+                        <button
+                          type="button"
+                          onClick={() => setPreviewZoomPhoto(rec.verificationPhoto || null)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-[11px] font-semibold transition cursor-pointer"
+                          title="Lihat foto terstempel koordinat GPS"
+                        >
+                          <Eye className="w-3 h-3 text-emerald-600" />
+                          <span>Foto GPS</span>
+                        </button>
+                      ) : (
+                        <span className="text-slate-400 text-[11px]">-</span>
                       )}
                     </td>
                     <td className="py-3 px-4 text-slate-500 max-w-xs truncate" title={rec.notes}>
@@ -2220,6 +2396,58 @@ export const EmployeePortal: React.FC<EmployeePortalProps> = ({
                 type="button"
                 onClick={() => setRadiusAlertModalOpen(false)}
                 className="w-full sm:w-auto py-2.5 px-4 rounded-xl border border-slate-300 text-xs font-semibold text-slate-600 hover:bg-white transition cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* LIVE CAMERA VERIFICATION MODAL WITH COORDINATE WATERMARK */}
+      {isCameraModalOpen && (
+        <CameraVerificationModal
+          isOpen={isCameraModalOpen}
+          onClose={() => setIsCameraModalOpen(false)}
+          onPhotoCaptured={(photoData) => {
+            setPhotoPreview(photoData);
+            setIsCameraModalOpen(false);
+          }}
+          watermarkData={getWatermarkPayload()}
+          title="Foto Verifikasi Presensi Geotagged"
+        />
+      )}
+
+      {/* FULL PHOTO ZOOM LIGHTBOX MODAL */}
+      {previewZoomPhoto && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/90 backdrop-blur-md animate-in fade-in">
+          <div className="relative max-w-2xl w-full bg-slate-900 rounded-2xl overflow-hidden border border-slate-800 shadow-2xl flex flex-col my-auto">
+            <div className="px-4 py-3 bg-slate-950 flex items-center justify-between border-b border-slate-800 text-white">
+              <div className="flex items-center gap-2 text-xs font-bold text-emerald-400">
+                <Camera className="w-4 h-4" />
+                <span>Foto Verifikasi Presensi Terstempel Koordinat Satelit GPS</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewZoomPhoto(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-3 bg-black flex items-center justify-center max-h-[75vh] overflow-auto">
+              <img
+                src={previewZoomPhoto}
+                alt="Foto Presensi Resolusi Penuh"
+                className="max-h-[70vh] w-auto object-contain rounded-lg shadow-lg"
+              />
+            </div>
+            <div className="p-3 bg-slate-950 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-400">
+              <span>Koordinat satelit, akurasi, waktu, dan NIP karyawan tercetak permanen pada foto</span>
+              <button
+                type="button"
+                onClick={() => setPreviewZoomPhoto(null)}
+                className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs transition cursor-pointer"
               >
                 Tutup
               </button>
